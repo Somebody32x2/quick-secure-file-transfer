@@ -25,17 +25,29 @@
  */
 
 const VERSION = 'qsft-v1';
-const SHELL_CACHE = `${VERSION}-shell`;
+
+/**
+ * Where this deployment is mounted, derived from the worker's own URL:
+ * "/sw.js" gives "/", "/filetransfer/sw.js" gives "/filetransfer/". This file is
+ * copied verbatim by the bundler, so it cannot read the build-time base and
+ * works it out at runtime instead. A worker can only control paths at or below
+ * its own URL, so this is exactly the scope it has anyway.
+ */
+const BASE = self.location.pathname.replace(/sw\.js$/, '') || '/';
+
+// Cache is keyed by mount point too, so two deployments on one origin cannot
+// collide.
+const SHELL_CACHE = `${VERSION}-shell${BASE === '/' ? '' : BASE.replace(/\//g, '_')}`;
 
 /** Fetched at install so the app opens offline. */
 const SHELL = [
-  '/',
-  '/manifest.webmanifest',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
-  '/icons/icon-maskable-192.png',
-  '/icons/icon-maskable-512.png',
-  '/icons/apple-touch-icon.png',
+  BASE,
+  `${BASE}manifest.webmanifest`,
+  `${BASE}icons/icon-192.png`,
+  `${BASE}icons/icon-512.png`,
+  `${BASE}icons/icon-maskable-192.png`,
+  `${BASE}icons/icon-maskable-512.png`,
+  `${BASE}icons/apple-touch-icon.png`,
 ];
 
 self.addEventListener('install', (event) => {
@@ -69,8 +81,10 @@ self.addEventListener('message', (event) => {
 function isCacheable(request, url) {
   if (request.method !== 'GET') return false;
   if (url.origin !== self.location.origin) return false;
-  if (url.pathname.startsWith('/api/')) return false;
-  if (url.pathname.startsWith('/socket.io/')) return false;
+  // Anything carrying transfer data, at this mount point or the origin root
+  // (belt and braces if a proxy rewrites the prefix).
+  if (url.pathname.startsWith(`${BASE}api/`) || url.pathname.startsWith('/api/')) return false;
+  if (url.pathname.startsWith(`${BASE}socket.io`) || url.pathname.startsWith('/socket.io')) return false;
   return true;
 }
 
@@ -93,11 +107,11 @@ self.addEventListener('fetch', (event) => {
         const response = await fetch(request);
         if (storable(response)) {
           const cache = await caches.open(SHELL_CACHE);
-          cache.put('/', response.clone());
+          cache.put(BASE, response.clone());
         }
         return response;
       } catch {
-        const cached = await caches.match('/', { cacheName: SHELL_CACHE });
+        const cached = await caches.match(BASE, { cacheName: SHELL_CACHE });
         return cached ?? Response.error();
       }
     })());
@@ -106,7 +120,7 @@ self.addEventListener('fetch', (event) => {
 
   // Build assets carry a content hash in the filename, so a hit is always
   // correct and never stale.
-  if (url.pathname.startsWith('/assets/')) {
+  if (url.pathname.startsWith(`${BASE}assets/`)) {
     event.respondWith((async () => {
       const cached = await caches.match(request, { cacheName: SHELL_CACHE });
       if (cached) return cached;

@@ -42,6 +42,21 @@ app.use((_req, res, next) => {
   next();
 });
 
+/**
+ * Alias paths redirect to the canonical mount point.
+ *
+ * Deliberately a redirect rather than a second live mount: serving the same PWA
+ * at two paths on one origin would give it two service worker scopes, two
+ * caches and two install identities.
+ */
+for (const alias of config.aliasPaths) {
+  const pattern = new RegExp(`^${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(/.*)?$`);
+  app.get(pattern, (req, res) => {
+    const rest = (req.params[0] ?? '').replace(/^\//, '');
+    res.redirect(301, `${config.basePath}/${rest}`);
+  });
+}
+
 app.use('/api', createRouter());
 
 if (fs.existsSync(config.publicDir)) {
@@ -97,6 +112,29 @@ const io = new SocketIOServer(server, {
 });
 attachLive(io);
 
+/**
+ * Serve correctly whether or not the reverse proxy strips the path prefix.
+ *
+ * Coolify/Traefik path routing may forward "/filetransfer/api/x" intact or
+ * strip it to "/api/x", and which one you get depends on the middleware
+ * configuration. Rather than betting on it, the prefix is removed here - before
+ * Express or Socket.IO see the request - so everything downstream is mounted at
+ * the root either way. If the proxy already stripped it, this is a no-op.
+ *
+ * Registered with prependListener so it runs ahead of both handlers, and it
+ * covers 'upgrade' as well so WebSocket connections get the same treatment.
+ */
+if (config.basePath) {
+  const stripPrefix = (req) => {
+    if (!req.url) return;
+    if (req.url === config.basePath) req.url = '/';
+    else if (req.url.startsWith(`${config.basePath}/`)) req.url = req.url.slice(config.basePath.length);
+    else if (req.url.startsWith(`${config.basePath}?`)) req.url = `/${req.url.slice(config.basePath.length)}`;
+  };
+  server.prependListener('request', stripPrefix);
+  server.prependListener('upgrade', stripPrefix);
+}
+
 const restored = await store.init();
 
 const sweeper = setInterval(() => {
@@ -107,6 +145,8 @@ sweeper.unref();
 server.listen(config.port, config.host, () => {
   const s = store.stats();
   console.log(`QSFT server listening on http://${config.host}:${config.port}`);
+  console.log(`  mounted at    ${config.basePath || '/'}`);
+  if (config.aliasPaths.length) console.log(`  redirects     ${config.aliasPaths.join(', ')} -> ${config.basePath || '/'}`);
   console.log(`  data dir      ${config.dataDir}`);
   console.log(`  restored      ${restored.restored} stored transfer(s), ${s.bytesOnDisk} bytes`);
   console.log(`  max retention ${config.maxTtlSeconds / 3600}h`);

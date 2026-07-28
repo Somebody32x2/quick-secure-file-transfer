@@ -21,7 +21,7 @@ For development, `npm run dev` runs the API on `:8080` and Vite on `:5173` with
 `--host`, so a phone on the same network can reach it.
 
 ```bash
-npm test           # 60 tests: crypto, container framing, degraded hosts, server, service worker
+npm test           # 61 tests: crypto, container framing, degraded hosts, server, service worker
 npm run icons      # regenerate the PWA icon set
 ```
 
@@ -237,6 +237,65 @@ transfers never throttles you — only guessing does.
 No TURN server is configured by default. If a NAT defeats direct P2P, QSFT falls
 back to its own relay, where the payload is already double-encrypted, rather
 than routing it through a third-party TURN operator.
+
+### Serving from a subpath
+
+QSFT can run at the root of a domain or under a path such as
+`samuelshuster.com/filetransfer`. Set `BASE_PATH` in **both** places — it is a
+build argument for the client (Vite bakes it into asset URLs) and a runtime
+variable for the server:
+
+```bash
+BASE_PATH=/filetransfer npm run build
+BASE_PATH=/filetransfer ALIAS_PATHS=/qsft npm start
+```
+
+Everything that constructs a URL follows it: API calls, the Socket.IO endpoint,
+the service worker's registration and scope, and the manifest. The manifest uses
+relative URLs and the service worker derives its own base from its URL, so
+neither needs templating.
+
+`ALIAS_PATHS` is a comma-separated list of paths that **301-redirect** to the
+canonical mount point. Redirects rather than second mounts, deliberately:
+serving one PWA at two paths on an origin gives it two service worker scopes,
+two caches, and two install identities for the same app.
+
+The server also tolerates a reverse proxy that strips the prefix. Path-based
+routing may forward `/filetransfer/api/x` intact or strip it to `/api/x`
+depending on middleware, so the prefix is removed before Express or Socket.IO
+see the request — if the proxy already did it, that is a no-op. Either
+configuration works.
+
+### Deploying with Docker / Coolify
+
+```bash
+docker build --build-arg BASE_PATH=/filetransfer -t qsft .
+docker run -p 8080:8080 -v qsft-data:/data \
+  -e BASE_PATH=/filetransfer -e ALIAS_PATHS=/qsft qsft
+```
+
+On Coolify, using the Dockerfile build pack:
+
+| Setting | Value |
+|---|---|
+| Build argument | `BASE_PATH=/filetransfer` |
+| Environment | `BASE_PATH=/filetransfer`, `ALIAS_PATHS=/qsft`, `TRUST_PROXY=1` |
+| Domain | `https://samuelshuster.com/filetransfer` |
+| Extra domain | `https://samuelshuster.com/qsft` (so the redirect is reachable) |
+| Persistent volume | `/data` |
+| Port | `8080` |
+
+Two things to get right or transfers break:
+
+- **The `/data` volume must persist.** Without it every redeploy silently
+  discards stored transfers that have not yet been collected.
+- **WebSockets must be allowed through** to `/filetransfer/socket.io`. Without
+  them live transfers lose the relay fallback, so any pair of devices that
+  cannot reach each other directly will fail rather than degrade.
+
+`TRUST_PROXY=1` matters because the code-guessing rate limiter keys on client
+IP; behind a proxy without it, every request looks like it comes from the proxy
+and one abuser would throttle everybody.
 
 ### Deployment notes
 

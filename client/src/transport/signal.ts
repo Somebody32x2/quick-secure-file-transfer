@@ -9,6 +9,7 @@
  */
 
 import { io, type Socket } from 'socket.io-client';
+import { socketPath } from '../config.js';
 
 export type PeerLeftReason = string;
 
@@ -55,6 +56,9 @@ export class Signal {
   static connect(timeoutMs = 15_000): Promise<Signal> {
     return new Promise((resolve, reject) => {
       const socket = io({
+        // Follows the app's mount point, so a subpath deployment reaches the
+        // right endpoint instead of the origin root.
+        path: socketPath(),
         transports: ['websocket', 'polling'],
         reconnection: false,
         timeout: timeoutMs,

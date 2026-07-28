@@ -7,6 +7,8 @@
  * rather than showing a dead install button.
  */
 
+import { asset, BASE } from './config.js';
+
 interface BeforeInstallPromptEvent extends Event {
   prompt(): Promise<void>;
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
@@ -96,7 +98,9 @@ export function initPwa(): void {
   if (!serviceWorkerSupported()) return;
 
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' }).then((registration) => {
+    // Scope is the mount point: a worker can only control paths at or below its
+    // own URL, so a subpath deployment scopes to that subpath.
+    navigator.serviceWorker.register(asset('sw.js'), { scope: BASE }).then((registration) => {
       const track = (worker: ServiceWorker | null) => {
         if (!worker) return;
         worker.addEventListener('statechange', () => {

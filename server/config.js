@@ -50,7 +50,31 @@ export const config = {
 
   trustProxy: process.env.TRUST_PROXY === '1',
   isProduction: process.env.NODE_ENV === 'production',
+
+  /**
+   * Mount point, e.g. "/filetransfer". Must match the BASE_PATH the client was
+   * built with. Empty means the origin root.
+   */
+  basePath: normalisePath(process.env.BASE_PATH),
+
+  /**
+   * Extra paths that redirect to the canonical mount point, comma separated.
+   * These are redirects rather than second mounts on purpose: two live copies of
+   * a PWA on one origin means two service worker scopes, two caches and two
+   * install identities for the same app.
+   */
+  aliasPaths: (process.env.ALIAS_PATHS ?? '')
+    .split(',')
+    .map((value) => normalisePath(value))
+    .filter(Boolean),
 };
+
+/** "/filetransfer/" or "filetransfer" -> "/filetransfer"; blank -> "". */
+function normalisePath(value) {
+  const trimmed = (value ?? '').trim().replace(/\/+$/, '');
+  if (!trimmed || trimmed === '/') return '';
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+}
 
 export const paths = {
   blobs: path.join(config.dataDir, 'blobs'),

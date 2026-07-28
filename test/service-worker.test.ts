@@ -27,7 +27,11 @@ interface FakeCache {
   keys(): Promise<unknown[]>;
 }
 
-function loadWorker() {
+/**
+ * @param base mount point the worker is served from. The worker derives this
+ *             from its own URL, so "/filetransfer/" simulates a subpath deploy.
+ */
+function loadWorker(base = '/') {
   const source = fs.readFileSync(path.join(root, 'client', 'public', 'sw.js'), 'utf8');
   const listeners: Record<string, ((event: any) => void)[]> = {};
   const cacheStore = new Map<string, FakeCache>();
@@ -46,7 +50,7 @@ function loadWorker() {
       addEventListener(type: string, handler: (event: any) => void) {
         (listeners[type] ??= []).push(handler);
       },
-      location: { origin: ORIGIN },
+      location: { origin: ORIGIN, pathname: `${base}sw.js` },
       clients: { claim: async () => {} },
       skipWaiting() {},
     },
@@ -149,17 +153,49 @@ test('the app shell is intercepted so it can work offline', () => {
   );
 });
 
+test('a subpath deployment scopes itself to that subpath', () => {
+  const { listeners } = loadWorker('/filetransfer/');
+
+  // Still refuses transfer data, now at the mounted prefix.
+  assert.equal(
+    dispatchFetch(listeners, `${ORIGIN}/filetransfer/api/store/123456`).handled, false,
+    'ciphertext must never be cached, at any mount point',
+  );
+  assert.equal(
+    dispatchFetch(listeners, `${ORIGIN}/filetransfer/socket.io/?EIO=4`).handled, false,
+    'relay traffic must bypass the worker, at any mount point',
+  );
+
+  // And still serves the shell, now at the mounted prefix.
+  assert.equal(
+    dispatchFetch(listeners, `${ORIGIN}/filetransfer/`, { mode: 'navigate' }).handled, true,
+    'the subpath shell must be served offline',
+  );
+  assert.equal(
+    dispatchFetch(listeners, `${ORIGIN}/filetransfer/assets/index-abc123.js`).handled, true,
+    'subpath assets must be cacheable',
+  );
+
+  // Requests outside the mount point are never delivered to this worker at all
+  // - the browser enforces scope - so there is nothing to assert about them
+  // here beyond the API/socket rules above, which hold at both prefixes.
+});
+
 test('the precache list contains only shell resources', () => {
   const source = fs.readFileSync(path.join(root, 'client', 'public', 'sw.js'), 'utf8');
-  const block = source.slice(source.indexOf('const SHELL = ['), source.indexOf('];', source.indexOf('const SHELL = [')));
-  const urls = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const start = source.indexOf('const SHELL = [');
+  const block = source.slice(start, source.indexOf('];', start));
+
+  // Entries are template literals rooted at the runtime-derived BASE.
+  const urls = [...block.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
 
   assert.ok(urls.length > 0, 'expected a precache list');
   for (const url of urls) {
-    assert.ok(!url.startsWith('/api/'), `${url} must not be precached`);
+    assert.ok(!url.includes('api/'), `${url} must not be precached`);
     assert.ok(!url.includes('socket.io'), `${url} must not be precached`);
+    assert.ok(url.startsWith('${BASE}'), `${url} must be relative to the mount point`);
   }
-  assert.ok(urls.includes('/'), 'the shell entry point must be precached');
+  assert.ok(block.includes('\n  BASE,'), 'the shell entry point must be precached');
 });
 
 test('the manifest points at icons that exist and cover both purposes', () => {
@@ -167,10 +203,16 @@ test('the manifest points at icons that exist and cover both purposes', () => {
     fs.readFileSync(path.join(root, 'client', 'public', 'manifest.webmanifest'), 'utf8'),
   );
 
-  assert.equal(manifest.start_url, '/');
-  assert.equal(manifest.scope, '/');
+  // Relative URLs resolve against the manifest's own location, so one file
+  // serves both a root deployment and a subpath one.
+  assert.equal(manifest.start_url, '.', 'start_url must be relative to the mount point');
+  assert.equal(manifest.scope, '.', 'scope must be relative to the mount point');
   assert.equal(manifest.display, 'standalone');
   assert.ok(manifest.name && manifest.short_name);
+
+  for (const icon of manifest.icons) {
+    assert.ok(!icon.src.startsWith('/'), `${icon.src} must be relative, not origin-absolute`);
+  }
 
   const purposes = new Set(manifest.icons.map((i: { purpose: string }) => i.purpose));
   assert.ok(purposes.has('any'), 'needs a standard icon');

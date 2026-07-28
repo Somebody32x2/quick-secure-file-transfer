@@ -1,5 +1,6 @@
 /** HTTP client for the store-and-forward path and server configuration. */
 
+import { api } from '../config.js';
 import type { IceServerConfig } from './p2p.js';
 
 export interface ServerConfig {
@@ -47,7 +48,7 @@ let cachedConfig: ServerConfig | null = null;
 
 export async function fetchServerConfig(): Promise<ServerConfig> {
   if (cachedConfig) return cachedConfig;
-  const response = await fetch('/api/config');
+  const response = await fetch(api('config'));
   if (!response.ok) await parseError(response);
   cachedConfig = await response.json();
   return cachedConfig!;
@@ -58,7 +59,7 @@ export async function initUpload(params: {
   maxReads: number;
   declaredSize: number;
 }): Promise<UploadTicket> {
-  const response = await fetch('/api/store/init', {
+  const response = await fetch(api('store/init'), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(params),
@@ -81,7 +82,7 @@ export async function uploadPart(
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch(`/api/store/${ticket.id}/part`, {
+      const response = await fetch(api(`store/${ticket.id}/part`), {
         method: 'PUT',
         headers: {
           'content-type': 'application/octet-stream',
@@ -108,7 +109,7 @@ export async function uploadPart(
 export async function commitUpload(ticket: UploadTicket): Promise<{
   code: string; expiresAt: number; maxReads: number; size: number;
 }> {
-  const response = await fetch(`/api/store/${ticket.id}/commit`, {
+  const response = await fetch(api(`store/${ticket.id}/commit`), {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-upload-token': ticket.token },
     body: '{}',
@@ -118,7 +119,7 @@ export async function commitUpload(ticket: UploadTicket): Promise<{
 }
 
 export async function revokeUpload(ticket: UploadTicket): Promise<void> {
-  await fetch(`/api/store/${ticket.id}/revoke`, {
+  await fetch(api(`store/${ticket.id}/revoke`), {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-upload-token': ticket.token },
     body: '{}',
@@ -131,7 +132,7 @@ export type ResolvedCode =
 
 /** One lookup tells the receiver whether a code is a waiting sender or a stored blob. */
 export async function resolveCode(code: string): Promise<ResolvedCode> {
-  const response = await fetch(`/api/resolve/${encodeURIComponent(code)}`);
+  const response = await fetch(api(`resolve/${encodeURIComponent(code)}`));
   if (!response.ok) await parseError(response);
   return response.json();
 }
@@ -142,7 +143,7 @@ export async function openStoredDownload(
   code: string,
   signal?: AbortSignal,
 ): Promise<{ stream: ReadableStream<Uint8Array>; size: number }> {
-  const response = await fetch(`/api/store/${encodeURIComponent(code)}`, { signal });
+  const response = await fetch(api(`store/${encodeURIComponent(code)}`), { signal });
   if (!response.ok) await parseError(response);
   if (!response.body) throw new ApiError('This browser cannot stream the download', 500);
   return {

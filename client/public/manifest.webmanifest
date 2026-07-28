@@ -1,39 +1,46 @@
 {
-  "id": "/",
+  "id": ".",
   "name": "QSFT — Quantum-Secure File Transfer",
   "short_name": "QSFT",
   "description": "Encrypted device-to-device file transfer. Files are encrypted on your device before anything leaves it.",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": ".",
+  "scope": ".",
   "display": "standalone",
-  "display_override": ["standalone", "minimal-ui"],
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
   "background_color": "#dedcd5",
   "theme_color": "#dedcd5",
-  "categories": ["utilities", "productivity", "security"],
+  "categories": [
+    "utilities",
+    "productivity",
+    "security"
+  ],
   "launch_handler": {
     "client_mode": "navigate-existing"
   },
   "icons": [
     {
-      "src": "/icons/icon-192.png",
+      "src": "icons/icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/icon-512.png",
+      "src": "icons/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/icon-maskable-192.png",
+      "src": "icons/icon-maskable-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "maskable"
     },
     {
-      "src": "/icons/icon-maskable-512.png",
+      "src": "icons/icon-maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
