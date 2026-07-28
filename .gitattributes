@@ -1,0 +1,8 @@
+# Normalise to LF in the repository regardless of the checkout platform.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending converted.
+*.png binary
+
+# Generated; collapse it in diffs and reviews.
+package-lock.json linguist-generated=true -diff

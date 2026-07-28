@@ -1,0 +1,32 @@
+{
+  "name": "qsft",
+  "version": "1.0.0",
+  "description": "Quantum-Secure File Transfer - end-to-end encrypted P2P / relay / store-and-forward file transfer",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "node server/index.js",
+    "dev:client": "vite",
+    "build": "vite build",
+    "icons": "node scripts/make-icons.mjs",
+    "start": "node server/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@noble/post-quantum": "^0.6.1",
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3"
+  }
+}

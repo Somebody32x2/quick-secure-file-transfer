@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#DEDCD5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1B1A18" media="(prefers-color-scheme: dark)" />
+    <meta name="description" content="Encrypted device-to-device file transfer. Nothing leaves your device unencrypted." />
+    <meta name="referrer" content="no-referrer" />
+    <title>QSFT — encrypted transfer</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23171614'/%3E%3Crect x='7' y='14' width='18' height='4' rx='1' fill='%230FA36B'/%3E%3Crect x='7' y='21' width='11' height='3' rx='1' fill='%23DEDCD5'/%3E%3C/svg%3E" />
+
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <!-- iOS predates the manifest and needs these to launch standalone. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="QSFT" />
+    <meta name="mobile-web-app-capable" content="yes" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>
+      <p style="padding: 2rem; font-family: system-ui">
+        QSFT encrypts files in your browser, so it needs JavaScript to work at all.
+      </p>
+    </noscript>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

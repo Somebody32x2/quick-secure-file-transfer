@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+# Encrypted blobs and their sidecars. Never commit user data.
+data/
+
+*.log
+.DS_Store
+.env
+.env.local
+.vite/
