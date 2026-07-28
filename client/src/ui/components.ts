@@ -237,23 +237,24 @@ export function installBanner(onChanged: () => void): HTMLElement | null {
 
   if (isStandalone()) return null;
 
+  // Installing is a nicety, not something to interrupt the page for, so the
+  // offer is a single quiet line rather than a boxed callout.
   if (canInstall()) {
-    return el('div', { class: 'notice' },
-      el('strong', { text: 'Install QSFT' }),
-      'Adds it to your home screen and lets the app open without a network round trip.',
-      el('div', { style: 'margin-top:.6rem' }, el('button', {
-        class: 'button secondary',
-        text: 'Install',
+    return el('p', { class: 'install-offer' },
+      el('button', {
+        type: 'button',
+        class: 'linkbutton',
+        text: 'Install as an app',
         onclick: async () => { await promptInstall(); onChanged(); },
-      })),
+      }),
     );
   }
 
   if (isIosSafari()) {
-    return el('div', { class: 'notice' },
-      el('strong', { text: 'Add QSFT to your home screen' }),
-      'Tap the Share button, then "Add to Home Screen".',
-    );
+    return el('p', {
+      class: 'install-offer hint',
+      text: 'Add to your home screen from the Share menu to keep it one tap away.',
+    });
   }
 
   return null;

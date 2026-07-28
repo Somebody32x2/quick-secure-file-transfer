@@ -21,7 +21,8 @@ import {
   type FileMeta,
 } from '../crypto/format.js';
 import { compress as gzip, compressionAvailable, decompress } from '../compress.js';
-import { backpressuredSource, ByteCursor, countBytes, fileReadable, rechunk } from '../chunker.js';
+import { backpressuredSource, ByteCursor, countBytes, rechunk } from '../chunker.js';
+import type { TransferSource } from '../source.js';
 import {
   commitUpload, fetchServerConfig, initUpload, openStoredDownload, revokeUpload,
   uploadPart,
@@ -31,7 +32,7 @@ import type { FileSink } from '../sink.js';
 import { ProgressThrottle, RateMeter, type EventSink } from './events.js';
 
 export interface StoredSendOptions {
-  file: File;
+  source: TransferSource;
   passphrase: string;
   compress: boolean;
   ttlSeconds: number;
@@ -49,8 +50,14 @@ export interface StoredSendResult {
 }
 
 export async function storedSend(options: StoredSendOptions): Promise<StoredSendResult> {
-  const { file, passphrase, onEvent, abort } = options;
-  if (file.size > MAX_FILE_BYTES) throw new Error('That file is larger than the 2 GB limit');
+  const { source, passphrase, onEvent, abort } = options;
+  if (source.size > MAX_FILE_BYTES) {
+    throw new Error(
+      source.bundled
+        ? 'Those files add up to more than the 2 GB limit'
+        : 'That file is larger than the 2 GB limit',
+    );
+  }
 
   const serverConfig = await fetchServerConfig();
   const useCompression = options.compress && compressionAvailable();
@@ -67,8 +74,8 @@ export async function storedSend(options: StoredSendOptions): Promise<StoredSend
   // Without compression the exact size is known, which lets the server reject
   // an oversized upload before a single byte moves.
   const declaredSize = useCompression
-    ? file.size
-    : sealedTotalLength(file.size, DEFAULT_CHUNK_SIZE);
+    ? source.size
+    : sealedTotalLength(source.size, DEFAULT_CHUNK_SIZE);
 
   onEvent({ t: 'status', message: 'Reserving a slot on the server...' });
   const ticket = await initUpload({
@@ -78,15 +85,15 @@ export async function storedSend(options: StoredSendOptions): Promise<StoredSend
   });
   onEvent({ t: 'code', code: ticket.code });
 
-  const meter = new RateMeter(file.size);
-  const progress = new ProgressThrottle(onEvent, meter, file.size);
+  const meter = new RateMeter(source.size);
+  const progress = new ProgressThrottle(onEvent, meter, source.size);
 
   try {
     onEvent({ t: 'status', message: 'Encrypting and uploading...' });
     let plaintextRead = 0;
 
-    let source = countBytes(fileReadable(file), (n) => { plaintextRead = n; });
-    if (useCompression) source = gzip(source);
+    let bytes$ = countBytes(source.stream(), (n) => { plaintextRead = n; });
+    if (useCompression) bytes$ = gzip(bytes$);
 
     // Accumulate sealed output into upload-sized parts.
     let buffer = new Uint8Array(partSize);
@@ -113,17 +120,17 @@ export async function storedSend(options: StoredSendOptions): Promise<StoredSend
 
     await push(sealer.headerBytes);
     await push(await sealer.sealMeta({
-      name: file.name, size: file.size, type: file.type, lastModified: file.lastModified,
+      name: source.name, size: source.size, type: source.type, lastModified: source.lastModified,
     }));
 
-    for await (const { bytes, isFinal } of rechunk(source, DEFAULT_CHUNK_SIZE)) {
+    for await (const { bytes, isFinal } of rechunk(bytes$, DEFAULT_CHUNK_SIZE)) {
       throwIfAborted(abort);
       await push(await sealer.seal(bytes, isFinal));
       progress.report(plaintextRead);
     }
     await flush(true);
     sealer.destroy();
-    progress.report(file.size, true);
+    progress.report(source.size, true);
 
     onEvent({ t: 'status', message: 'Finalising...' });
     const committed = await commitUpload(ticket);

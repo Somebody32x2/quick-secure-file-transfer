@@ -10,7 +10,17 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
-    if (value === undefined || value === false) continue;
+    if (value === undefined) continue;
+
+    // ARIA state attributes take the literal strings "true"/"false" - a bare
+    // present-but-empty attribute does not mean true, and omitting it when
+    // false loses the state entirely for both CSS and screen readers.
+    if (key.startsWith('aria-') && typeof value === 'boolean') {
+      node.setAttribute(key, value ? 'true' : 'false');
+      continue;
+    }
+
+    if (value === false) continue;
     if (key.startsWith('on') && typeof value === 'function') {
       node.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
     } else if (key === 'class') {

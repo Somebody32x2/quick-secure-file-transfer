@@ -140,11 +140,13 @@ p { margin: 0; }
 
 .wordmark span { color: var(--signal); }
 
-.masthead .tagline {
-  font-size: 0.75rem;
+.masthead .nameplate {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: var(--ink-faint);
   text-align: right;
-  max-width: 15rem;
 }
 
 .module {
@@ -180,24 +182,49 @@ p { margin: 0; }
 }
 
 .switch button {
+  position: relative;
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--ink-soft);
+  color: var(--ink-faint);
   font-family: var(--font-mono);
   font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  padding: 0.7rem 0.5rem;
+  padding: 0.7rem 0.5rem 0.62rem;
   border-radius: 2px;
   cursor: pointer;
+  transition: color 120ms ease, background-color 120ms ease;
 }
 
+.switch button:hover:not([aria-pressed="true"]) { color: var(--ink-soft); }
+
+/*
+ * The selected side reads as a lit key on the panel: raised out of the recess,
+ * full-strength text, and a signal-coloured bar under it. On a two-item switch
+ * a subtle background change alone is too easy to misread.
+ */
 .switch button[aria-pressed="true"] {
   background: var(--panel-hi);
   color: var(--ink);
+  font-weight: 700;
   box-shadow: var(--shadow-raise);
+}
+
+.switch button[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0.7rem;
+  right: 0.7rem;
+  bottom: 0.34rem;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--signal);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch button { transition: none; }
 }
 
 label.field { display: block; }
@@ -301,6 +328,88 @@ button:focus-visible,
 .filedrop.dragging { border-color: var(--signal); background: var(--signal-soft); }
 .filedrop input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .filedrop .filename { font-weight: 600; word-break: break-all; }
+
+/* --- multi-file selection ------------------------------------------------ */
+
+.filelist {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.filelist li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem 0.4rem 0.65rem;
+  font-size: 0.8125rem;
+  background: var(--well);
+}
+
+.filelist li + li { border-top: 1px solid var(--rule-soft); }
+
+.filelist-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filelist-size {
+  flex: none;
+  font-size: 0.6875rem;
+  color: var(--ink-faint);
+}
+
+.filelist-remove {
+  flex: none;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0.15rem 0.3rem;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.filelist-remove:hover { color: var(--alert); background: var(--panel-lo); }
+
+.filelist-more {
+  color: var(--ink-faint);
+  font-size: 0.75rem;
+  justify-content: center;
+}
+
+.install-offer {
+  margin: 0 0 0.75rem;
+  text-align: right;
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+}
+
+.install-offer .linkbutton { padding: 0; margin: 0; }
+
+/* Quiet text-weight action, for things that must not compete with the primary button. */
+.linkbutton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0.4rem 0;
+  margin-top: 0.15rem;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.linkbutton:hover { color: var(--ink); }
 
 /* --- carrier meter (signature) ------------------------------------------- */
 

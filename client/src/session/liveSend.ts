@@ -15,7 +15,8 @@ import { ARGON2_DEFAULTS, deriveMaster, sessionSalt } from '../crypto/kdf.js';
 import { preferredSuite } from '../crypto/aead.js';
 import { MAX_FILE_BYTES } from '../crypto/format.js';
 import { compress as gzip, compressionAvailable } from '../compress.js';
-import { countBytes, fileReadable, rechunk } from '../chunker.js';
+import { countBytes, rechunk } from '../chunker.js';
+import type { TransferSource } from '../source.js';
 import { Signal } from '../transport/signal.js';
 import { establishLink } from '../transport/link.js';
 import { fetchServerConfig } from '../transport/api.js';
@@ -29,7 +30,7 @@ import {
 } from './protocol.js';
 
 export interface LiveSendOptions {
-  file: File;
+  source: TransferSource;
   passphrase: string;
   compress: boolean;
   onEvent: EventSink;
@@ -37,9 +38,13 @@ export interface LiveSendOptions {
 }
 
 export async function liveSend(options: LiveSendOptions): Promise<void> {
-  const { file, passphrase, onEvent, abort } = options;
-  if (file.size > MAX_FILE_BYTES) {
-    throw new Error('That file is larger than the 2 GB limit');
+  const { source, passphrase, onEvent, abort } = options;
+  if (source.size > MAX_FILE_BYTES) {
+    throw new Error(
+      source.bundled
+        ? 'Those files add up to more than the 2 GB limit'
+        : 'That file is larger than the 2 GB limit',
+    );
   }
 
   const serverConfig = await fetchServerConfig();
@@ -85,7 +90,7 @@ export async function liveSend(options: LiveSendOptions): Promise<void> {
 
     await send(MSG_HEADER, sealer.headerBytes);
     await send(MSG_META, await sealer.sealMeta({
-      name: file.name, size: file.size, type: file.type, lastModified: file.lastModified,
+      name: source.name, size: source.size, type: source.type, lastModified: source.lastModified,
     }));
 
     // Inbound control loop: credits, the go-ahead, and the final confirmation.
@@ -122,20 +127,20 @@ export async function liveSend(options: LiveSendOptions): Promise<void> {
 
     onEvent({ t: 'status', message: `Sending over ${link.kind === 'p2p' ? 'the direct connection' : 'the relay'}...` });
 
-    const meter = new RateMeter(file.size);
-    const progress = new ProgressThrottle(onEvent, meter, file.size);
+    const meter = new RateMeter(source.size);
+    const progress = new ProgressThrottle(onEvent, meter, source.size);
     let plaintextRead = 0;
 
-    let source = countBytes(fileReadable(file), (n) => { plaintextRead = n; });
-    if (useCompression) source = gzip(source);
+    let bytes$ = countBytes(source.stream(), (n) => { plaintextRead = n; });
+    if (useCompression) bytes$ = gzip(bytes$);
 
-    for await (const { bytes, isFinal } of rechunk(source, LIVE_CHUNK_SIZE)) {
+    for await (const { bytes, isFinal } of rechunk(bytes$, LIVE_CHUNK_SIZE)) {
       throwIfAborted(abort);
       await gate.take();
       await send(MSG_DATA, await sealer.seal(bytes, isFinal), isFinal);
       progress.report(plaintextRead);
     }
-    progress.report(file.size, true);
+    progress.report(source.size, true);
     sealer.destroy();
 
     onEvent({ t: 'status', message: 'Waiting for the receiver to verify...' });
@@ -143,7 +148,7 @@ export async function liveSend(options: LiveSendOptions): Promise<void> {
 
     channel.destroy();
     onEvent({ t: 'status', message: 'Transfer complete and verified.' });
-    onEvent({ t: 'done', name: file.name });
+    onEvent({ t: 'done', name: source.name });
   } finally {
     cleanup?.();
     signal.close();

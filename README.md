@@ -21,7 +21,7 @@ For development, `npm run dev` runs the API on `:8080` and Vite on `:5173` with
 `--host`, so a phone on the same network can reach it.
 
 ```bash
-npm test           # 61 tests: crypto, container framing, degraded hosts, server, service worker
+npm test           # 72 tests: crypto, container, zip bundling, degraded hosts, server, service worker
 npm run icons      # regenerate the PWA icon set
 ```
 
@@ -36,6 +36,14 @@ endpoint.
 Pick a file, type a passphrase, and choose how to send it. The other device
 enters the 6-digit code and the same passphrase. QSFT works out on its own
 whether that code is a live sender or a stored blob.
+
+Selecting several files bundles them into one ZIP as they stream, so a
+multi-file send is still one transfer, one code, and one "decrypted and
+verified" result covering the whole set. Entries are stored uncompressed
+because the pipeline already gzips and encrypts the archive — compressing twice
+would just burn CPU on a phone. Colliding names are made unique rather than
+silently overwriting each other. A single file is sent exactly as before, with
+no archive wrapper.
 
 **Live** — both devices open at once.
 
@@ -321,6 +329,8 @@ client/
     transport/ signal (Socket.IO), p2p (WebRTC), link, api
     session/   liveSend, liveReceive, stored, handshake, protocol, pump
     ui/        dom, components, transferScreen
+    zip.ts     streaming ZIP writer for multi-file sends
+    source.ts  single file vs. bundled selection
     pwa.ts     install prompt, update handling
 server/        index, routes, live, store, codes, config, util
 scripts/       dev, test, make-icons

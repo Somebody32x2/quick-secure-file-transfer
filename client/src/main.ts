@@ -10,10 +10,12 @@ import './styles.css';
 import { el, mount } from './ui/dom.js';
 import { environmentPanel, installBanner, notice, passphraseField } from './ui/components.js';
 import { initPwa, onPwaChange } from './pwa.js';
+import { BASE } from './config.js';
 import { TransferScreen } from './ui/transferScreen.js';
 import { caps } from './crypto/env.js';
 import { MAX_FILE_BYTES } from './crypto/format.js';
-import { compressionAvailable, looksCompressible } from './compress.js';
+import { compressionAvailable } from './compress.js';
+import { selectionLooksCompressible, selectionSize, sourceFor } from './source.js';
 import { formatBytes } from './util/bytes.js';
 import { AbortedError } from './util/deferred.js';
 import { liveSend } from './session/liveSend.js';
@@ -30,9 +32,12 @@ let mode: Mode = 'send';
 // -- shell -------------------------------------------------------------------
 
 function masthead(): HTMLElement {
+  // A nameplate, not a pitch. What the tool does is evident from using it, and
+  // the security model is stated once in the footer where it can be read
+  // properly rather than skimmed past at the top of every screen.
   return el('header', { class: 'masthead' },
     el('div', { class: 'wordmark' }, 'QS', el('span', { text: 'FT' })),
-    el('p', { class: 'tagline', text: 'Files are encrypted on this device before anything leaves it.' }),
+    el('p', { class: 'nameplate', text: 'end-to-end encrypted' }),
   );
 }
 
@@ -75,7 +80,7 @@ function degradedRandomWarning(): HTMLElement | null {
 // -- send --------------------------------------------------------------------
 
 interface SendState {
-  file: File | null;
+  files: File[];
   passphrase: string;
   method: 'live' | 'stored';
   compress: boolean;
@@ -84,7 +89,7 @@ interface SendState {
 }
 
 const sendState: SendState = {
-  file: null,
+  files: [],
   passphrase: '',
   method: 'live',
   compress: true,
@@ -92,20 +97,35 @@ const sendState: SendState = {
   maxReads: 1,
 };
 
-function filePicker(onPick: (file: File) => void): HTMLElement {
+const MAX_LISTED_FILES = 5;
+
+function filePicker(onPick: (files: File[]) => void): HTMLElement {
+  const { files } = sendState;
+  const total = selectionSize(files);
+
+  const summary = files.length === 0
+    ? 'Choose files'
+    : files.length === 1
+      ? files[0].name
+      : `${files.length} files`;
+
+  const detail = files.length === 0
+    ? 'Up to 2 GB total. Tap to browse, or drop files here.'
+    : files.length === 1
+      ? formatBytes(total)
+      : `${formatBytes(total)} — sent as one zip`;
+
   const caption = el('div', {},
-    el('p', { class: 'filename', text: sendState.file ? sendState.file.name : 'Choose a file' }),
-    el('p', {
-      class: 'hint',
-      text: sendState.file ? formatBytes(sendState.file.size) : 'Up to 2 GB. Tap to browse, or drop a file here.',
-    }),
+    el('p', { class: 'filename', text: summary }),
+    el('p', { class: 'hint', text: detail }),
   );
 
   const input = el('input', {
     type: 'file',
+    multiple: true,
     onchange: (event: Event) => {
-      const file = (event.target as HTMLInputElement).files?.[0];
-      if (file) onPick(file);
+      const picked = [...((event.target as HTMLInputElement).files ?? [])];
+      if (picked.length) onPick(picked);
     },
   });
 
@@ -119,15 +139,55 @@ function filePicker(onPick: (file: File) => void): HTMLElement {
   drop.addEventListener('drop', (event: DragEvent) => {
     event.preventDefault();
     drop.classList.remove('dragging');
-    const file = event.dataTransfer?.files?.[0];
-    if (file) onPick(file);
+    const dropped = [...(event.dataTransfer?.files ?? [])];
+    if (dropped.length) onPick(dropped);
   });
 
   return drop;
 }
 
+/** Compact manifest of a multi-file selection, with per-file removal. */
+function fileList(): HTMLElement | null {
+  const { files } = sendState;
+  if (files.length < 2) return null;
+
+  const rows = files.slice(0, MAX_LISTED_FILES).map((file, index) => el('li', {},
+    el('span', { class: 'filelist-name', text: file.name }),
+    el('span', { class: 'filelist-size mono', text: formatBytes(file.size) }),
+    el('button', {
+      type: 'button',
+      class: 'filelist-remove',
+      'aria-label': `Remove ${file.name}`,
+      text: '×',
+      onclick: () => {
+        sendState.files = sendState.files.filter((_, i) => i !== index);
+        render();
+      },
+    }),
+  ));
+
+  const hidden = files.length - rows.length;
+  if (hidden > 0) {
+    rows.push(el('li', { class: 'filelist-more' },
+      el('span', { text: `and ${hidden} more` }),
+    ));
+  }
+
+  return el('div', {},
+    el('ul', { class: 'filelist' }, ...rows),
+    el('button', {
+      type: 'button',
+      class: 'linkbutton',
+      text: 'Clear all',
+      onclick: () => { sendState.files = []; render(); },
+    }),
+  );
+}
+
 function renderSend(): void {
-  const oversize = !!sendState.file && sendState.file.size > MAX_FILE_BYTES;
+  const totalBytes = selectionSize(sendState.files);
+  const hasFiles = sendState.files.length > 0;
+  const oversize = totalBytes > MAX_FILE_BYTES;
 
   const methodSwitch = el('div', { class: 'switch', role: 'group', 'aria-label': 'Transfer method' },
     el('button', {
@@ -143,7 +203,7 @@ function renderSend(): void {
   const start = el('button', {
     class: 'button',
     text: sendState.method === 'live' ? 'Get a code and wait' : 'Encrypt and upload',
-    disabled: !sendState.file || !sendState.passphrase || oversize,
+    disabled: !hasFiles || !sendState.passphrase || oversize,
     onclick: () => startSend(),
   });
 
@@ -176,15 +236,25 @@ function renderSend(): void {
     installBanner(render),
     el('div', { class: 'module' },
       el('div', { class: 'module-head' }, el('h2', { text: 'Send a file' })),
-      filePicker((file) => { sendState.file = file; sendState.compress = looksCompressible(file.name, file.type); render(); }),
-      oversize && notice('bad', 'File is too large', `That file is ${formatBytes(sendState.file!.size)}. The limit is 2 GB.`),
+      filePicker((picked) => {
+        // Adding to the selection rather than replacing it: on mobile the
+        // picker often only reaches one source at a time (camera roll, then
+        // files), so replacing would make a mixed selection impossible.
+        sendState.files = [...sendState.files, ...picked];
+        sendState.compress = selectionLooksCompressible(sendState.files);
+        render();
+      }),
+      fileList(),
+      oversize && notice(
+        'bad',
+        sendState.files.length > 1 ? 'Those files are too large' : 'File is too large',
+        `That comes to ${formatBytes(totalBytes)}. The limit is 2 GB.`,
+      ),
       passphraseField({
         value: sendState.passphrase,
         onChange: (value) => {
-          const wasEmpty = !sendState.passphrase;
           sendState.passphrase = value;
-          if (wasEmpty !== !value) start.disabled = !sendState.file || !value || oversize;
-          start.disabled = !sendState.file || !value || oversize;
+          start.disabled = !hasFiles || !value || oversize;
         },
       }),
     ),
@@ -290,17 +360,20 @@ function runTransfer(
 }
 
 function startSend(): void {
-  const { file, passphrase, method, compress } = sendState;
-  if (!file) return;
+  const { files, passphrase, method, compress } = sendState;
+  if (files.length === 0) return;
+
+  // Several files become one zip; a single file is sent exactly as before.
+  const source = sourceFor(files);
 
   if (method === 'live') {
     runTransfer('Sending live', async (_screen, onEvent, abort) => {
-      await liveSend({ file, passphrase, compress, onEvent, abort });
+      await liveSend({ source, passphrase, compress, onEvent, abort });
     });
   } else {
     runTransfer('Uploading', async (screen, onEvent, abort) => {
       const result = await storedSend({
-        file,
+        source,
         passphrase,
         compress,
         ttlSeconds: sendState.ttlHours * 3600,
@@ -339,6 +412,21 @@ function render(): void {
   else renderReceive();
 }
 
+/**
+ * Land on the canonical path.
+ *
+ * Alias paths are meant to redirect server-side, but a reverse proxy that
+ * strips the prefix before forwarding means the server never sees the alias and
+ * cannot redirect it. Correcting it here guarantees one canonical URL however
+ * the proxy is configured - which matters because the service worker's scope
+ * and the installed app's identity are both tied to that path.
+ */
+function enforceCanonicalPath(): void {
+  if (BASE === '/' || location.pathname.startsWith(BASE)) return;
+  location.replace(BASE + location.search + location.hash);
+}
+
+enforceCanonicalPath();
 initPwa();
 // An install offer or a waiting update can arrive at any time; redraw for it,
 // unless a transfer is on screen.

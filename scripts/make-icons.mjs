@@ -114,9 +114,65 @@ function fillRoundedRect(canvas, x0, y0, x1, y1, radius, colour) {
 }
 
 /**
- * @param inset fraction of the canvas kept clear around the mark. Maskable
- *              icons need their content inside the safe zone, because launchers
- *              crop them to arbitrary shapes.
+ * Fill a polygon given in normalised (0..1) coordinates.
+ *
+ * Coverage is estimated by supersampling each pixel, which is what keeps the
+ * arrowheads' diagonals from looking ragged at 192px.
+ */
+function fillPolygon(canvas, points, colour) {
+  const s = canvas.size;
+  const px = points.map(([x, y]) => [x * s, y * s]);
+  const minX = Math.max(0, Math.floor(Math.min(...px.map((p) => p[0]))));
+  const maxX = Math.min(s - 1, Math.ceil(Math.max(...px.map((p) => p[0]))));
+  const minY = Math.max(0, Math.floor(Math.min(...px.map((p) => p[1]))));
+  const maxY = Math.min(s - 1, Math.ceil(Math.max(...px.map((p) => p[1]))));
+
+  const inside = (x, y) => {
+    let hit = false;
+    for (let i = 0, j = px.length - 1; i < px.length; j = i++) {
+      const [xi, yi] = px[i];
+      const [xj, yj] = px[j];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) hit = !hit;
+    }
+    return hit;
+  };
+
+  const SS = 3;
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      let covered = 0;
+      for (let sy = 0; sy < SS; sy++) {
+        for (let sx = 0; sx < SS; sx++) {
+          if (inside(x + (sx + 0.5) / SS, y + (sy + 0.5) / SS)) covered++;
+        }
+      }
+      if (covered === 0) continue;
+      setPixel(canvas, x, y, colour, Math.round((covered / (SS * SS)) * 255));
+    }
+  }
+}
+
+/**
+ * A horizontal arrow as one polygon: shaft, then a head.
+ * @param dir 1 points right, -1 points left.
+ */
+function arrow(x0, x1, yCentre, shaftHalf, headHalf, headLength, dir) {
+  const [tail, tip] = dir > 0 ? [x0, x1] : [x1, x0];
+  const neck = tip - dir * headLength;
+  return [
+    [tail, yCentre - shaftHalf],
+    [neck, yCentre - shaftHalf],
+    [neck, yCentre - headHalf],
+    [tip, yCentre],
+    [neck, yCentre + headHalf],
+    [neck, yCentre + shaftHalf],
+    [tail, yCentre + shaftHalf],
+  ];
+}
+
+/**
+ * @param maskable keeps the mark inside the safe zone, because launchers crop
+ *                 maskable icons to arbitrary shapes.
  */
 function drawIcon(size, { maskable = false, opaque = false } = {}) {
   const canvas = createCanvas(size);
@@ -128,14 +184,18 @@ function drawIcon(size, { maskable = false, opaque = false } = {}) {
     fillRoundedRect(canvas, 0, 0, 1, 1, 0.18, INK);
   }
 
-  // Content sits inside the safe zone on maskable icons, wider otherwise.
-  const scale = maskable ? 0.62 : 0.86;
+  const scale = maskable ? 0.62 : 0.84;
   const pad = (1 - scale) / 2;
   const at = (v) => pad + v * scale;
 
-  // Lit signal segment, then a shorter unlit one - the carrier meter.
-  fillRoundedRect(canvas, at(0.06), at(0.34), at(0.94), at(0.48), 0.02, SIGNAL);
-  fillRoundedRect(canvas, at(0.06), at(0.58), at(0.58), at(0.70), 0.02, PANEL);
+  // Two opposed arrows: a file going out, a file coming back. The outbound one
+  // is lit in the signal colour, the inbound one sits in panel grey.
+  const shaft = 0.075 * scale;
+  const head = 0.165 * scale;
+  const headLen = 0.26 * scale;
+
+  fillPolygon(canvas, arrow(at(0.04), at(0.96), at(0.34), shaft, head, headLen, 1), SIGNAL);
+  fillPolygon(canvas, arrow(at(0.04), at(0.96), at(0.66), shaft, head, headLen, -1), PANEL);
 
   return encodePng(size, size, canvas.pixels);
 }
