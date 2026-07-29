@@ -230,12 +230,12 @@ export async function storedReceive(options: StoredReceiveOptions): Promise<void
     opener.destroy();
 
     progress.report(meta.size, true);
-    const { url } = await sink.close(meta.name, meta.type);
+    const { url, blob } = await sink.close(meta.name, meta.type);
     const savedToDisk = sink.kind === 'disk';
     sink = null;
 
     onEvent({ t: 'status', message: 'Received and verified.' });
-    onEvent({ t: 'done', url, name: meta.name, savedToDisk });
+    onEvent({ t: 'done', url, blob, name: meta.name, savedToDisk });
   } catch (err) {
     source?.fail(err instanceof Error ? err : new Error(String(err)));
     await sink?.abort();

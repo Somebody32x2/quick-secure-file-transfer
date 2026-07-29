@@ -177,7 +177,7 @@ export async function liveReceive(options: LiveReceiveOptions): Promise<void> {
     opener.destroy();
 
     progress.report(meta.size, true);
-    const { url } = await sink.close(meta.name, meta.type);
+    const { url, blob } = await sink.close(meta.name, meta.type);
     const savedToDisk = sink.kind === 'disk';
     sink = null;
 
@@ -185,7 +185,7 @@ export async function liveReceive(options: LiveReceiveOptions): Promise<void> {
     channel.destroy();
 
     onEvent({ t: 'status', message: 'Received and verified.' });
-    onEvent({ t: 'done', url, name: meta.name, savedToDisk });
+    onEvent({ t: 'done', url, blob, name: meta.name, savedToDisk });
   } catch (err) {
     // Unblock the drain task so it settles instead of hanging on a dead stream.
     source?.fail(err instanceof Error ? err : new Error(String(err)));

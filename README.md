@@ -21,7 +21,7 @@ For development, `npm run dev` runs the API on `:8080` and Vite on `:5173` with
 `--host`, so a phone on the same network can reach it.
 
 ```bash
-npm test           # 72 tests: crypto, container, zip bundling, degraded hosts, server, service worker
+npm test           # 77 tests: crypto, container, zip bundling, degraded hosts, server, service worker
 npm run icons      # regenerate the PWA icon set
 ```
 
@@ -39,7 +39,11 @@ whether that code is a live sender or a stored blob.
 
 Selecting several files bundles them into one ZIP as they stream, so a
 multi-file send is still one transfer, one code, and one "decrypted and
-verified" result covering the whole set. Entries are stored uncompressed
+verified" result covering the whole set. The receiver opens the bundle rather
+than dropping a zip in the downloads folder: it lists what arrived and offers
+each file individually, or the whole archive. The listing is read from the
+archive's tail, and each file is sliced out on demand, so browsing a 2 GB bundle
+does not pull it into memory. Entries are stored uncompressed
 because the pipeline already gzips and encrypts the archive — compressing twice
 would just burn CPU on a phone. Colliding names are made unique rather than
 silently overwriting each other. A single file is sent exactly as before, with
@@ -339,6 +343,7 @@ client/
     session/   liveSend, liveReceive, stored, handshake, protocol, pump
     ui/        dom, components, transferScreen
     zip.ts     streaming ZIP writer for multi-file sends
+    unzip.ts   reads a received bundle without loading it
     source.ts  single file vs. bundled selection
     pwa.ts     install prompt, update handling
 server/        index, routes, live, store, codes, config, util

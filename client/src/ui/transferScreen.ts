@@ -9,6 +9,7 @@ import {
 } from './components.js';
 import { formatBytes } from '../util/bytes.js';
 import { createBlobSink, requestDiskSink, triggerDownload, type FileSink } from '../sink.js';
+import { extractEntry, looksLikeZip, readZipIndex } from '../unzip.js';
 import { caps } from '../crypto/env.js';
 import type { TransferEvent } from '../session/events.js';
 import type { FileMeta } from '../crypto/format.js';
@@ -160,7 +161,12 @@ export class TransferScreen {
         el('p', { class: 'hint' },
           el('b', { text: meta.name }), ` — ${formatBytes(meta.size)}`,
         ),
-        el('p', { class: 'hint', text: 'Downloads automatically once it arrives and passes its integrity check.' }),
+        el('p', {
+          class: 'hint',
+          text: looksLikeZip(meta.name, meta.type)
+            ? 'Once it arrives and passes its integrity check you can pick which files to save.'
+            : 'Downloads automatically once it arrives and passes its integrity check.',
+        }),
       );
       this.statusLine.textContent = 'Receiving...';
       return Promise.resolve(createBlobSink());
@@ -201,6 +207,14 @@ export class TransferScreen {
     this.setState('Verified', 'ok');
 
     if (event.url && event.name) {
+      // A bundle is worth opening rather than dumping in the downloads folder,
+      // so check before triggering anything.
+      if (event.blob && looksLikeZip(event.name, event.blob.type)) {
+        void this.showArchiveContents(event.blob, event.url, event.name);
+        this.renderActions();
+        return;
+      }
+
       // Integrity is already proven at this point, so handing the file over is safe.
       triggerDownload(event.url, event.name);
       mount(this.extraSlot,
@@ -219,6 +233,77 @@ export class TransferScreen {
 
     announce('Transfer complete and verified');
     this.renderActions();
+  }
+
+  /**
+   * List what a received archive contains and let each file be saved on its
+   * own, rather than dropping a zip in the downloads folder for the user to go
+   * and unpack. Falls back to offering the whole archive if it cannot be read.
+   */
+  private async showArchiveContents(blob: Blob, url: string, name: string): Promise<void> {
+    mount(this.extraSlot, el('p', { class: 'hint', text: 'Opening the bundle...' }));
+
+    const entries = await readZipIndex(blob);
+    const saveWhole = el('button', {
+      class: 'button secondary',
+      text: `Save all as ${name}`,
+      onclick: () => triggerDownload(url, name),
+    });
+    const problem = el('div');
+
+    if (!entries) {
+      // Verified, just not something we can browse - hand over the archive.
+      mount(this.extraSlot,
+        notice('good', 'Received and verified', `${name} has been decrypted and its authentication tags checked.`),
+        el('div', { style: 'margin-top:.75rem' }, saveWhole),
+      );
+      return;
+    }
+
+    const rows = entries.map((entry) => {
+      const save = el('button', {
+        type: 'button',
+        class: 'linkbutton',
+        text: 'Save',
+        onclick: async () => {
+          save.disabled = true;
+          const previous = save.textContent;
+          save.textContent = 'Saving...';
+          try {
+            const file = await extractEntry(blob, entry);
+            const fileUrl = URL.createObjectURL(file);
+            triggerDownload(fileUrl, entry.name);
+            save.textContent = 'Saved';
+          } catch (err) {
+            save.textContent = 'Failed';
+            mount(problem, notice(
+              'bad',
+              'Could not extract that file',
+              err instanceof Error ? err.message : String(err),
+            ));
+          } finally {
+            setTimeout(() => { save.disabled = false; save.textContent = previous; }, 2000);
+          }
+        },
+      });
+
+      return el('li', {},
+        el('span', { class: 'filelist-name', text: entry.name }),
+        el('span', { class: 'filelist-size mono', text: formatBytes(entry.size) }),
+        save,
+      );
+    });
+
+    mount(this.extraSlot,
+      notice(
+        'good',
+        `Received ${entries.length} file${entries.length === 1 ? '' : 's'}`,
+        'Decrypted and verified. Save them individually, or take the whole bundle.',
+      ),
+      el('ul', { class: 'filelist' }, ...rows),
+      problem,
+      el('div', { style: 'margin-top:.75rem' }, saveWhole),
+    );
   }
 
   showError(message: string): void {

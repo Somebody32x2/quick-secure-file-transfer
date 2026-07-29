@@ -12,6 +12,7 @@ import zlib from 'node:zlib';
 
 import { bundleName, zipSize, zipStream } from '../client/src/zip.ts';
 import { crc32 } from '../client/src/util/crc32.ts';
+import { extractEntry, looksLikeZip, readZipIndex } from '../client/src/unzip.ts';
 import { selectionSize, sourceFor, selectionLooksCompressible } from '../client/src/source.ts';
 
 /** Minimal File stand-in: Node 20 has File, but this keeps lastModified fixed. */
@@ -227,4 +228,111 @@ test('compressibility is judged on the members, not the .zip name', () => {
 test('bundleName reflects how many files were selected', () => {
   const files = [1, 2, 3, 4].map((n) => fakeFile(`f${n}.bin`, bytesOf(n, 4)));
   assert.match(bundleName(files), /^qsft-4-files-/);
+});
+
+// ---------------------------------------------------------------------------
+// Reading a received archive back
+// ---------------------------------------------------------------------------
+
+test('a received bundle can be indexed and its entries extracted individually', async () => {
+  const a = bytesOf(3, 5000);
+  const b = bytesOf(9, 120);
+  const c = bytesOf(4, 40000);
+  const files = [fakeFile('report.pdf', a), fakeFile('tiny.txt', b), fakeFile('data.bin', c)];
+
+  const blob = new Blob([await drain(zipStream(files))], { type: 'application/zip' });
+  const entries = await readZipIndex(blob);
+  assert.ok(entries, 'expected the archive to be readable');
+
+  assert.deepEqual(entries!.map((e) => e.name), ['report.pdf', 'tiny.txt', 'data.bin']);
+  assert.deepEqual(entries!.map((e) => e.size), [5000, 120, 40000]);
+
+  // Extract out of order, to prove offsets are used rather than sequence.
+  for (const [entry, want] of [[entries![2], c], [entries![0], a], [entries![1], b]] as const) {
+    const out = new Uint8Array(await (await extractEntry(blob, entry)).arrayBuffer());
+    assert.deepEqual(out, want, `${entry.name} did not round-trip`);
+  }
+});
+
+test('indexing reads only the tail, not the whole archive', async () => {
+  // The point of slicing: opening a 2 GB bundle must not pull it into memory.
+  const files = [fakeFile('big.bin', bytesOf(2, 400_000))];
+  const raw = await drain(zipStream(files));
+
+  let bytesRead = 0;
+  const real = new Blob([raw], { type: 'application/zip' });
+  const counting = {
+    size: real.size,
+    type: real.type,
+    slice: (start?: number, end?: number) => {
+      bytesRead += (end ?? real.size) - (start ?? 0);
+      return real.slice(start, end);
+    },
+  } as unknown as Blob;
+
+  const entries = await readZipIndex(counting);
+  assert.ok(entries);
+  assert.ok(
+    bytesRead < raw.length / 4,
+    `indexing read ${bytesRead} of ${raw.length} bytes; it should only touch the tail`,
+  );
+});
+
+test('a deflated archive is inflated on extraction', async () => {
+  // Not something QSFT produces, but a plausible thing for someone to send.
+  const payload = new TextEncoder().encode('compress me '.repeat(500));
+  const deflated = zlib.deflateRawSync(Buffer.from(payload));
+  const name = Buffer.from('doc.txt');
+
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(0x0800, 6);
+  local.writeUInt16LE(8, 8); // deflate
+  local.writeUInt32LE(zlib.crc32 ? zlib.crc32(Buffer.from(payload)) : 0, 14);
+  local.writeUInt32LE(deflated.length, 18);
+  local.writeUInt32LE(payload.length, 22);
+  local.writeUInt16LE(name.length, 26);
+
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(0x0800, 8);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(deflated.length, 20);
+  central.writeUInt32LE(payload.length, 24);
+  central.writeUInt16LE(name.length, 28);
+  central.writeUInt32LE(0, 42);
+
+  const centralStart = local.length + name.length + deflated.length;
+  const centralBytes = Buffer.concat([central, name]);
+
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(1, 8);
+  eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(centralBytes.length, 12);
+  eocd.writeUInt32LE(centralStart, 16);
+
+  const archive = Buffer.concat([local, name, deflated, centralBytes, eocd]);
+  const blob = new Blob([archive], { type: 'application/zip' });
+
+  const entries = await readZipIndex(blob);
+  assert.ok(entries, 'deflated archive should still be indexable');
+  assert.equal(entries![0].method, 8);
+
+  const out = new Uint8Array(await (await extractEntry(blob, entries![0])).arrayBuffer());
+  assert.deepEqual(out, payload);
+});
+
+test('unreadable input is reported as such rather than guessed at', async () => {
+  assert.equal(await readZipIndex(new Blob([new Uint8Array(0)])), null);
+  assert.equal(await readZipIndex(new Blob([bytesOf(1, 5000)])), null, 'random bytes are not an archive');
+  assert.equal(await readZipIndex(new Blob([new TextEncoder().encode('hello world')])), null);
+});
+
+test('looksLikeZip keys off type or extension', () => {
+  assert.equal(looksLikeZip('bundle.zip', ''), true);
+  assert.equal(looksLikeZip('bundle', 'application/zip'), true);
+  assert.equal(looksLikeZip('photo.jpg', 'image/jpeg'), false);
 });

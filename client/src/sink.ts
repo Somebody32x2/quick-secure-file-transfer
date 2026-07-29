@@ -18,8 +18,12 @@ import { caps } from './crypto/env.js';
 export interface FileSink {
   readonly kind: 'disk' | 'blob';
   write(chunk: Uint8Array): Promise<void>;
-  /** @returns an object URL when the sink buffered in memory, nothing when it streamed to disk. */
-  close(name: string, type: string): Promise<{ url?: string }>;
+  /**
+   * @returns an object URL and the Blob itself when the sink buffered in
+   * memory, nothing when it streamed to disk. The Blob lets the receiver open a
+   * bundle and offer its contents individually without re-reading the file.
+   */
+  close(name: string, type: string): Promise<{ url?: string; blob?: Blob }>;
   abort(): Promise<void>;
 }
 
@@ -46,11 +50,11 @@ class BlobSink implements FileSink {
     this.pendingBytes = 0;
   }
 
-  async close(_name: string, type: string): Promise<{ url?: string }> {
+  async close(_name: string, type: string): Promise<{ url?: string; blob?: Blob }> {
     this.flush();
     const blob = new Blob(this.parts as BlobPart[], { type: type || 'application/octet-stream' });
     this.parts = [];
-    return { url: URL.createObjectURL(blob) };
+    return { url: URL.createObjectURL(blob), blob };
   }
 
   async abort(): Promise<void> {
@@ -68,7 +72,7 @@ class DiskSink implements FileSink {
     await this.writable.write(chunk as unknown as BufferSource);
   }
 
-  async close(): Promise<{ url?: string }> {
+  async close(): Promise<{ url?: string; blob?: Blob }> {
     await this.writable.close();
     return {};
   }

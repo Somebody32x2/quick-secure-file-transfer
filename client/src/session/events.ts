@@ -10,7 +10,7 @@ export type TransferEvent =
   | { t: 'meta'; meta: FileMeta }
   | { t: 'awaiting-destination'; meta: FileMeta }
   | { t: 'progress'; bytes: number; total: number; bytesPerSecond: number; etaSeconds: number }
-  | { t: 'done'; url?: string; name?: string; savedToDisk?: boolean }
+  | { t: 'done'; url?: string; name?: string; savedToDisk?: boolean; blob?: Blob }
   | { t: 'error'; message: string };
 
 export type EventSink = (event: TransferEvent) => void;
