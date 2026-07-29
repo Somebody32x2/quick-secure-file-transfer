@@ -19,7 +19,7 @@ import { Signal } from '../transport/signal.js';
 import { establishLink } from '../transport/link.js';
 import { fetchServerConfig } from '../transport/api.js';
 import { timingSafeEqual } from '../util/bytes.js';
-import { throwIfAborted } from '../util/deferred.js';
+import { throwIfAborted, withTimeout } from '../util/deferred.js';
 import type { FileSink } from '../sink.js';
 import { ProgressThrottle, RateMeter, type EventSink } from './events.js';
 import { runResponderHandshake } from './handshake.js';
@@ -80,6 +80,11 @@ export async function liveReceive(options: LiveReceiveOptions): Promise<void> {
     const channel = await SecureChannel.create(session, 'responder');
     const pump = new MessagePump(established, channel);
 
+    // Only now is this device actually listening on the link. Relay frames that
+    // arrive before this point are not buffered anywhere, so the sender must
+    // not start until it has seen this.
+    signal.sendSignal({ kind: 'receiver-attached' });
+
     const send = async (type: number, payload?: Uint8Array): Promise<void> => {
       const sealed = await channel.seal(encodeMessage(type as 1, payload), false);
       await established.send(wrapFrame(sealed, false));
@@ -87,7 +92,11 @@ export async function liveReceive(options: LiveReceiveOptions): Promise<void> {
 
     // -- container header and metadata --------------------------------------
     onEvent({ t: 'status', message: 'Waiting for the sender...' });
-    const headerMessage = await pump.expect(MSG_HEADER);
+    const headerMessage = await withTimeout(
+      pump.expect(MSG_HEADER),
+      2 * 60_000,
+      'The sender never sent anything. Ask them to start the transfer again.',
+    );
     if (headerMessage.payload.length < HEADER_LEN) throw new Error('Malformed transfer header');
     const fields = decodeHeader(headerMessage.payload);
     const headerBytes = headerMessage.payload.subarray(0, HEADER_LEN);

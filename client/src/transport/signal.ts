@@ -102,6 +102,35 @@ export class Signal {
     this.socket.emit('live:signal', payload);
   }
 
+  /**
+   * Resolve when a signalling message of `kind` arrives.
+   *
+   * Race-free: onSignal replays everything received so far, so it does not
+   * matter whether the peer's message beat this call.
+   */
+  waitFor<T = unknown>(kind: string, timeoutMs = 30_000): Promise<T> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn();
+      };
+
+      const timer = setTimeout(
+        () => finish(() => reject(new SignalError(`Timed out waiting for the other device (${kind})`))),
+        timeoutMs,
+      );
+
+      this.onSignal((raw) => {
+        const message = raw as { kind?: string };
+        if (message?.kind === kind) finish(() => resolve(message as T));
+      });
+      this.onPeerLeft((reason) => finish(() => reject(new SignalError(reason))));
+    });
+  }
+
   sendData(frame: Uint8Array): void {
     this.socket.emit('live:data', frame);
   }

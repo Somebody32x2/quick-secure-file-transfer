@@ -147,8 +147,27 @@ export class TransferScreen {
    * the protocol waits here rather than picking a destination automatically.
    */
   askDestination(meta: FileMeta): Promise<FileSink> {
+    // Checked live rather than from the load-time snapshot, so a host that
+    // exposes the picker late (or not at all) is judged on what it can do now.
+    const canPickLocation = caps.fileSystemAccess
+      && typeof (globalThis as { showSaveFilePicker?: unknown }).showSaveFilePicker === 'function';
+
+    // Without a save picker there is nothing to ask: the browser hands the file
+    // over once it is complete and verified. Blocking on a tap here bought
+    // nothing on mobile and left both devices sitting in "waiting" states.
+    if (!canPickLocation) {
+      mount(this.extraSlot,
+        el('p', { class: 'hint' },
+          el('b', { text: meta.name }), ` — ${formatBytes(meta.size)}`,
+        ),
+        el('p', { class: 'hint', text: 'Downloads automatically once it arrives and passes its integrity check.' }),
+      );
+      this.statusLine.textContent = 'Receiving...';
+      return Promise.resolve(createBlobSink());
+    }
+
     return new Promise((resolve) => {
-      const streamToDisk = caps.fileSystemAccess;
+      const streamToDisk = canPickLocation;
       const save = el('button', {
         class: 'button',
         text: `Save ${meta.name}`,

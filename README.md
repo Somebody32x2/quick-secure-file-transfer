@@ -55,6 +55,15 @@ no archive wrapper.
    keeps nothing. Backpressure is credit-based, so in-flight memory stays at a
    couple of megabytes rather than the size of the file.
 
+The two devices **agree** on which of those to use rather than deciding
+separately. They run independent WebRTC attempts with independent timeouts, so
+one can succeed while the other gives up — a phone on cellular and a laptop on
+wifi will not agree on how long ICE should take. Each reports its result and
+direct is used only if both got there; otherwise both fall back together. The
+sender also waits for the receiver to confirm it is attached to the link before
+sending anything, because relay frames are not buffered anywhere and a frame
+sent too early is simply lost.
+
 **Leave on server** — upload now, collect later. The encrypted blob waits under
 its code until whichever limit comes first:
 

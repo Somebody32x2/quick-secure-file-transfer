@@ -20,7 +20,7 @@ import type { TransferSource } from '../source.js';
 import { Signal } from '../transport/signal.js';
 import { establishLink } from '../transport/link.js';
 import { fetchServerConfig } from '../transport/api.js';
-import { deferred, throwIfAborted, AbortedError } from '../util/deferred.js';
+import { deferred, throwIfAborted, withTimeout, AbortedError } from '../util/deferred.js';
 import { ProgressThrottle, RateMeter, type EventSink } from './events.js';
 import { runInitiatorHandshake } from './handshake.js';
 import { CreditGate, MessagePump } from './pump.js';
@@ -88,6 +88,11 @@ export async function liveSend(options: LiveSendOptions): Promise<void> {
       master, salt, suite, chunkSize: LIVE_CHUNK_SIZE, compressed: useCompression,
     });
 
+    // Wait until the receiver is attached to the link before putting anything
+    // on it. Frames sent earlier would be dropped with no error anywhere.
+    onEvent({ t: 'status', message: 'Waiting for the other device to be ready...' });
+    await signal.waitFor('receiver-attached', 60_000);
+
     await send(MSG_HEADER, sealer.headerBytes);
     await send(MSG_META, await sealer.sealMeta({
       name: source.name, size: source.size, type: source.type, lastModified: source.lastModified,
@@ -122,8 +127,12 @@ export async function liveSend(options: LiveSendOptions): Promise<void> {
       }
     })();
 
-    onEvent({ t: 'status', message: 'Waiting for the receiver to choose where to save...' });
-    await ready.promise;
+    onEvent({ t: 'status', message: 'Waiting for the receiver to accept...' });
+    await withTimeout(
+      ready.promise,
+      10 * 60_000,
+      'The receiver never started the transfer. They may need to pick where to save it.',
+    );
 
     onEvent({ t: 'status', message: `Sending over ${link.kind === 'p2p' ? 'the direct connection' : 'the relay'}...` });
 

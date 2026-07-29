@@ -177,8 +177,17 @@ function describeCandidate(type: string): string {
 }
 
 /**
- * Try direct first, fall back to the relay. `onProgress` narrates the attempt
- * so the UI can explain what is happening during the WebRTC wait.
+ * Try direct first, fall back to the relay - and make sure both devices reach
+ * the same answer.
+ *
+ * Deciding independently is not safe. The two sides run separate WebRTC
+ * attempts with separate timeouts, so one can succeed while the other gives up
+ * (a phone on cellular and a laptop on wifi will not agree on how long ICE
+ * takes). The winner then writes to a data channel while the loser listens on
+ * the relay socket, and the transfer deadlocks with no error on either side.
+ *
+ * So each device reports its own result and waits for the peer's. Direct is
+ * used only if *both* got there; otherwise both fall back together.
  */
 export async function establishLink(
   signal: Signal,
@@ -188,11 +197,34 @@ export async function establishLink(
 ): Promise<Link> {
   onProgress?.('Trying a direct connection...');
   const direct = await tryDirectConnection(signal, role, iceServers);
-  if (direct) {
+
+  signal.sendSignal({ kind: 'link', p2p: !!direct });
+  onProgress?.(direct
+    ? 'Direct connection up - checking the other device agrees...'
+    : 'Direct connection unavailable - agreeing on the relay...');
+
+  let peerHasDirect = false;
+  try {
+    const peer = await signal.waitFor<{ p2p?: boolean }>('link', 45_000);
+    peerHasDirect = !!peer.p2p;
+  } catch {
+    // No word from the peer: the relay is the safe assumption, since it is the
+    // one path that cannot have been half-established.
+    peerHasDirect = false;
+  }
+
+  if (direct && peerHasDirect) {
     const detail = describeCandidate(direct.candidateType);
     onProgress?.(`Connected ${detail}`);
     return new P2pLink(direct.channel, detail);
   }
-  onProgress?.('Direct connection unavailable - falling back to the encrypted relay');
+
+  if (direct) {
+    // We got a channel but the peer did not; tear it down so nothing is written
+    // into a pipe the other end is not reading.
+    try { direct.channel.close(); direct.pc.close(); } catch { /* already gone */ }
+  }
+
+  onProgress?.('Using the encrypted relay');
   return new RelayLink(signal);
 }
