@@ -3,44 +3,16 @@ import { config } from './config.js';
 import * as store from './store.js';
 import * as codes from './codes.js';
 import { clientIp, httpError, isValidCode, RateLimiter } from './util.js';
+import { guardCodeLookup, noteFailure, noteSuccess } from './guard.js';
 
-/** Throttles code guessing. A 6-digit code is small; enumeration must not be cheap. */
-const ipLimiter = new RateLimiter(config.codeAttemptsPerIp, config.codeAttemptWindowMs);
-const codeFailures = new Map();
+/** Bounds how fast one address can mint upload reservations. */
+const initLimiter = new RateLimiter(config.storeInitPerIp, config.storeInitWindowMs);
+setInterval(() => initLimiter.sweep(), 60_000).unref();
 
-setInterval(() => {
-  ipLimiter.sweep();
-  const cutoff = Date.now() - config.codeAttemptWindowMs;
-  for (const [code, entry] of codeFailures) {
-    if (entry.last < cutoff) codeFailures.delete(code);
-  }
-}, 60_000).unref();
-
-function guardCodeLookup(req, code) {
-  const ip = clientIp(req);
-  const { allowed, retryAfterMs } = ipLimiter.check(ip);
-  if (!allowed) {
-    throw httpError(429, 'Too many code attempts. Wait a few minutes and try again.', {
-      retryAfterSeconds: Math.ceil(retryAfterMs / 1000),
-    });
-  }
-  const entry = codeFailures.get(code);
-  if (entry && entry.count >= config.codeMaxFailuresPerCode) {
-    throw httpError(429, 'This code has been guessed at too many times and is temporarily locked.');
-  }
-}
-
-function noteFailure(code) {
-  const entry = codeFailures.get(code) ?? { count: 0, last: 0 };
-  entry.count += 1;
-  entry.last = Date.now();
-  codeFailures.set(code, entry);
-}
-
-/** A lookup that resolved to a real transfer was not a guess; refund it. */
-function noteSuccess(req, code) {
-  ipLimiter.pardon(clientIp(req));
-  codeFailures.delete(code);
+/** Loopback only - the container healthcheck, not the internet. */
+function isLocal(req) {
+  const addr = req.socket?.remoteAddress ?? '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
 
 export function createRouter() {
@@ -48,8 +20,14 @@ export function createRouter() {
   const json = express.json({ limit: '64kb' });
   const raw = express.raw({ type: '*/*', limit: config.maxPartBytes + 4096 });
 
-  router.get('/health', (_req, res) => {
-    res.json({ ok: true, ...store.stats() });
+  /**
+   * Liveness only from outside. The item count and bytes-on-disk are a public
+   * readout of how much traffic a privacy tool is carrying, which is nobody
+   * else's business; the Docker healthcheck reaches this over loopback and
+   * still gets the detail.
+   */
+  router.get('/health', (req, res) => {
+    res.json(isLocal(req) ? { ok: true, ...store.stats() } : { ok: true });
   });
 
   /** Limits the client needs to know before it starts sealing bytes. */
@@ -72,7 +50,8 @@ export function createRouter() {
   router.get('/resolve/:code', async (req, res) => {
     const { code } = req.params;
     if (!isValidCode(code)) throw httpError(400, 'Codes are six digits');
-    guardCodeLookup(req, code);
+    const ip = clientIp(req);
+    guardCodeLookup(ip, code);
 
     const entry = codes.resolve(code);
     if (!entry) {
@@ -85,21 +64,29 @@ export function createRouter() {
         noteFailure(code);
         throw httpError(404, 'That transfer has expired or was already collected.');
       }
-      noteSuccess(req, code);
+      noteSuccess(ip, code);
       res.json({ kind: 'stored', ...store.describe(record) });
       return;
     }
-    noteSuccess(req, code);
+    noteSuccess(ip, code);
     res.json({ kind: 'live' });
   });
 
   // -- upload ---------------------------------------------------------------
 
   router.post('/store/init', json, async (req, res) => {
+    const ip = clientIp(req);
+    const { allowed, retryAfterMs } = initLimiter.check(ip);
+    if (!allowed) {
+      throw httpError(429, 'Too many uploads started from this device. Wait a few minutes.', {
+        retryAfterSeconds: Math.ceil(retryAfterMs / 1000),
+      });
+    }
     const record = await store.createUpload({
       ttlSeconds: req.body?.ttlSeconds,
       maxReads: req.body?.maxReads,
       declaredSize: req.body?.declaredSize,
+      ownerIp: ip,
     });
     res.status(201).json({
       id: record.id,
@@ -111,13 +98,34 @@ export function createRouter() {
     });
   });
 
-  router.put('/store/:id/part', raw, async (req, res) => {
+  /**
+   * Authorise before agreeing to read a body.
+   *
+   * `express.raw` will happily buffer the full 8 MiB into memory and only then
+   * hand it to a handler that rejects it for a bad token. That makes an
+   * unauthenticated request an 8 MiB memory allocation, and nothing upstream
+   * caps how many of those may be in flight. Checking the token first turns the
+   * same request into a 403 on the headers alone.
+   */
+  const authoriseUpload = (req, _res, next) => {
     const index = Number.parseInt(req.get('x-part-index') ?? '', 10);
-    if (!Number.isInteger(index) || index < 0) throw httpError(400, 'Missing or invalid x-part-index');
+    if (!Number.isInteger(index) || index < 0) {
+      return next(httpError(400, 'Missing or invalid x-part-index'));
+    }
+    try {
+      store.assertUploadAuth(req.params.id, req.get('x-upload-token'));
+    } catch (err) {
+      return next(err);
+    }
+    req.partIndex = index;
+    return next();
+  };
+
+  router.put('/store/:id/part', authoriseUpload, raw, async (req, res) => {
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw httpError(400, 'Empty part body');
 
     const result = await store.appendPart(
-      req.params.id, req.get('x-upload-token'), index, req.body,
+      req.params.id, req.get('x-upload-token'), req.partIndex, req.body,
     );
     res.json(result);
   });
@@ -142,28 +150,30 @@ export function createRouter() {
   router.get('/store/:code/meta', async (req, res) => {
     const { code } = req.params;
     if (!isValidCode(code)) throw httpError(400, 'Codes are six digits');
-    guardCodeLookup(req, code);
+    const ip = clientIp(req);
+    guardCodeLookup(ip, code);
 
     const record = store.peek(code);
     if (!record) {
       noteFailure(code);
       throw httpError(404, 'No transfer with that code. It may have expired or already been collected.');
     }
-    noteSuccess(req, code);
+    noteSuccess(ip, code);
     res.json(store.describe(record));
   });
 
   router.get('/store/:code', async (req, res) => {
     const { code } = req.params;
     if (!isValidCode(code)) throw httpError(400, 'Codes are six digits');
-    guardCodeLookup(req, code);
+    const ip = clientIp(req);
+    guardCodeLookup(ip, code);
 
     const session = store.beginRead(code);
     if (!session) {
       noteFailure(code);
       throw httpError(404, 'No transfer with that code. It may have expired or already been collected.');
     }
-    noteSuccess(req, code);
+    noteSuccess(ip, code);
 
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', String(session.size));

@@ -20,7 +20,10 @@ export default defineConfig({
     outDir: '../dist/public',
     emptyOutDir: true,
     target: 'es2022',
-    sourcemap: true,
+    // Not shipped to production: the maps are served alongside the bundle under
+    // an immutable cache header and add over a megabyte for no user benefit.
+    // Build with SOURCEMAP=1 when you need to debug a built bundle.
+    sourcemap: process.env.SOURCEMAP === '1',
   },
   server: {
     // host:true so phones on the LAN can reach the dev server (the untrusted-host case)

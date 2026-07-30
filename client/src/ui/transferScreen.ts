@@ -12,7 +12,7 @@ import { createBlobSink, requestDiskSink, triggerDownload, type FileSink } from 
 import { extractEntry, looksLikeZip, readZipIndex } from '../unzip.js';
 import { caps } from '../crypto/env.js';
 import type { TransferEvent } from '../session/events.js';
-import type { FileMeta } from '../crypto/format.js';
+import { sanitizeFilename, type FileMeta } from '../crypto/format.js';
 
 export interface TransferScreenOptions {
   title: string;
@@ -206,23 +206,27 @@ export class TransferScreen {
     this.meter.setProgress(1);
     this.setState('Verified', 'ok');
 
-    if (event.url && event.name) {
+    if (event.blob && event.name) {
+      const { blob, name } = event;
+
       // A bundle is worth opening rather than dumping in the downloads folder,
       // so check before triggering anything.
-      if (event.blob && looksLikeZip(event.name, event.blob.type)) {
-        void this.showArchiveContents(event.blob, event.url, event.name);
+      if (looksLikeZip(name, blob.type)) {
+        void this.showArchiveContents(blob, name);
         this.renderActions();
         return;
       }
 
       // Integrity is already proven at this point, so handing the file over is safe.
-      triggerDownload(event.url, event.name);
+      triggerDownload(blob, name);
       mount(this.extraSlot,
-        notice('good', 'Received and verified', `${event.name} has been decrypted and its authentication tags checked.`),
+        notice('good', 'Received and verified', `${name} has been decrypted and its authentication tags checked.`),
         el('div', { style: 'margin-top:.75rem' }, el('button', {
           class: 'button',
           text: 'Save again',
-          onclick: () => triggerDownload(event.url!, event.name!),
+          // Holds the Blob, not a URL: a URL minted at download time is revoked
+          // a minute later, and this button outlives that.
+          onclick: () => triggerDownload(blob, name),
         })),
       );
     } else if (event.savedToDisk) {
@@ -240,14 +244,14 @@ export class TransferScreen {
    * own, rather than dropping a zip in the downloads folder for the user to go
    * and unpack. Falls back to offering the whole archive if it cannot be read.
    */
-  private async showArchiveContents(blob: Blob, url: string, name: string): Promise<void> {
+  private async showArchiveContents(blob: Blob, name: string): Promise<void> {
     mount(this.extraSlot, el('p', { class: 'hint', text: 'Opening the bundle...' }));
 
     const entries = await readZipIndex(blob);
     const saveWhole = el('button', {
       class: 'button secondary',
       text: `Save all as ${name}`,
-      onclick: () => triggerDownload(url, name),
+      onclick: () => triggerDownload(blob, name),
     });
     const problem = el('div');
 
@@ -271,8 +275,12 @@ export class TransferScreen {
           save.textContent = 'Saving...';
           try {
             const file = await extractEntry(blob, entry);
-            const fileUrl = URL.createObjectURL(file);
-            triggerDownload(fileUrl, entry.name);
+            // Entry names come out of the archive's central directory, which is
+            // sender-controlled, and go straight into a `download` attribute.
+            // The outer filename is sanitised on the way out of the container;
+            // these must be held to the same standard rather than trusting the
+            // browser to scrub separators for us.
+            triggerDownload(file, sanitizeFilename(entry.name));
             save.textContent = 'Saved';
           } catch (err) {
             save.textContent = 'Failed';

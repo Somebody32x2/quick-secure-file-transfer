@@ -27,12 +27,51 @@ export function safeEqual(a, b) {
   return crypto.timingSafeEqual(ab, bb);
 }
 
-export function clientIp(req) {
-  if (config.trustProxy) {
-    const fwd = req.headers['x-forwarded-for'];
-    if (typeof fwd === 'string' && fwd.length) return fwd.split(',')[0].trim();
+/**
+ * Work out who is actually talking to us, counting proxy hops from the right.
+ *
+ * `X-Forwarded-For` is client-supplied at its left edge and cannot be trusted
+ * there: anyone may send `X-Forwarded-For: 1.2.3.4` and, if we read the leftmost
+ * value, become a fresh identity on every request. What a client *cannot* forge
+ * is the right edge, because each proxy appends the address it genuinely saw. So
+ * with N trusted proxies the client is N entries from the end.
+ *
+ * With one proxy and an honest client the header is `[client]` and we take it.
+ * With one proxy and a client that prepended a lie it is `[lie, client]`, and we
+ * still take the client. That is the whole point.
+ *
+ * Both the HTTP and Socket.IO paths call this, and they must agree: they share
+ * one rate-limit bucket, so any divergence would hand an attacker two budgets.
+ */
+export function resolveIp(remoteAddress, forwardedFor) {
+  const direct = remoteAddress ?? 'unknown';
+  const trust = config.trustProxy;
+  if (!trust) return direct;
+
+  const chain = String(forwardedFor ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+  if (!chain.length) return direct;
+
+  if (Array.isArray(trust)) {
+    // Walk left past every address we recognise as our own infrastructure.
+    let i = chain.length - 1;
+    while (i >= 0 && trust.includes(chain[i])) i -= 1;
+    return chain[i] ?? chain[0];
   }
-  return req.socket?.remoteAddress ?? 'unknown';
+  // Numeric: the nearest proxy is the socket peer and is not in the header, so
+  // `trust` hops back from the end lands on the client.
+  return chain[chain.length - trust] ?? chain[0];
+}
+
+export function clientIp(req) {
+  return resolveIp(req.socket?.remoteAddress, req.headers?.['x-forwarded-for']);
+}
+
+/** Same resolution for a Socket.IO handshake, which is not an Express request. */
+export function socketIp(socket) {
+  return resolveIp(
+    socket.conn?.remoteAddress ?? socket.handshake?.address,
+    socket.handshake?.headers?.['x-forwarded-for'],
+  );
 }
 
 export function isValidCode(code) {

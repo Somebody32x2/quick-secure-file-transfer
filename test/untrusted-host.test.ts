@@ -28,11 +28,15 @@ const { randomBytes } = await import('./client/src/crypto/env.ts');
 const { preferredSuite, SUITE_XCHACHA20_POLY1305 } = await import('./client/src/crypto/aead.ts');
 const { ChunkSealer, ChunkOpener } = await import('./client/src/crypto/stream.ts');
 const { decodeHeader } = await import('./client/src/crypto/format.ts');
-const { deriveMaster, sessionSalt } = await import('./client/src/crypto/kdf.ts');
+const { deriveMaster } = await import('./client/src/crypto/kdf.ts');
 const { Initiator, Responder } = await import('./client/src/crypto/kex.ts');
 const { shortAuthString } = await import('./client/src/crypto/sas.ts');
 
 const KDF = { memKiB: 1024, timeCost: 1, lanes: 1 };
+
+/** Any fixed 16-byte salt; this probe only needs both sides to agree on one. */
+const testSalt = (seed) =>
+  Uint8Array.from({ length: 16 }, (_, i) => (seed.charCodeAt(i % seed.length) + i * 7) & 0xff);
 const payload = randomBytes(40000);
 
 // Full container round trip with whatever primitives this host allows.
@@ -52,7 +56,7 @@ for (let i = 1; i < chunks.length; i++) out.push(...(await opener.open(chunks[i]
 const roundTripped = out.length === payload.length && out.every((b, i) => b === payload[i]);
 
 // The hybrid PQ handshake must also work with no WebCrypto.
-const salt = sessionSalt('424242');
+const salt = testSalt('424242');
 const m = await deriveMaster('pw', salt, KDF);
 const initiator = Initiator.start(m, salt, KDF);
 const responder = Responder.respond(initiator.hello, m);

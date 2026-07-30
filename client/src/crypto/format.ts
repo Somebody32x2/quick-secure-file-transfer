@@ -18,7 +18,7 @@
  * AAD stops an attacker downgrading the cipher suite or KDF parameters.
  */
 
-import { SALT_LEN, type KdfParams } from './kdf.js';
+import { assertKdfParams, SALT_LEN, type KdfParams } from './kdf.js';
 import { suiteSpec } from './aead.js';
 
 export const MAGIC = new Uint8Array([0x51, 0x53, 0x46, 0x54]); // "QSFT"
@@ -91,21 +91,22 @@ export function decodeHeader(bytes: Uint8Array): Header {
     throw new Error(`Implausible chunk size ${chunkSize}`);
   }
 
-  const memKiB = dv.getUint32(8, false);
   // Refuse absurd Argon2 parameters: a hostile header could otherwise make the
-  // receiver allocate gigabytes or spin for hours.
-  if (memKiB < 1024 || memKiB > 1024 * 1024) throw new Error('Rejecting out-of-range Argon2 memory cost');
-  const timeCost = bytes[12];
-  if (timeCost < 1 || timeCost > 16) throw new Error('Rejecting out-of-range Argon2 time cost');
-  const lanes = bytes[13];
-  if (lanes < 1 || lanes > 16) throw new Error('Rejecting out-of-range Argon2 lanes');
+  // receiver allocate gigabytes or spin for hours. The bound is on the *product*
+  // as well as each field, because that is what the cost actually is.
+  const kdf = {
+    memKiB: dv.getUint32(8, false),
+    timeCost: bytes[12],
+    lanes: bytes[13],
+  };
+  assertKdfParams(kdf);
 
   return {
     version,
     suite,
     kdfId,
     compressed: (bytes[7] & FLAG_COMPRESSED) !== 0,
-    kdf: { memKiB, timeCost, lanes },
+    kdf,
     salt: bytes.slice(16, 16 + SALT_LEN),
     noncePrefix: bytes.slice(32, 32 + NONCE_PREFIX_FIELD_LEN),
     chunkSize,

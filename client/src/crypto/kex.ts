@@ -38,7 +38,7 @@ import { hkdf } from '@noble/hashes/hkdf.js';
 
 import { randomBytes } from './env.js';
 import { wipe, preferredSuite, suiteSpec, type SuiteId } from './aead.js';
-import { LABEL_SESSION_AUTH, subkey, type KdfParams } from './kdf.js';
+import { assertKdfParams, LABEL_SESSION_AUTH, subkey, type KdfParams } from './kdf.js';
 import {
   concat, fromBase64Exact, lengthPrefixed, timingSafeEqual, toBase64, u32be, utf8,
 } from '../util/bytes.js';
@@ -147,21 +147,21 @@ function ecdh(privateKey: Uint8Array, peerPublic: Uint8Array): Uint8Array {
   return shared;
 }
 
+/**
+ * HELLO is unauthenticated when we read it - the MAC that proves the sender
+ * holds the passphrase can only be checked *after* we have derived a key with
+ * these very parameters. So they are peer-controlled input to an expensive
+ * operation, and the bound has to hold before we spend anything on them.
+ */
 function parseKdf(raw: unknown): KdfParams {
   const k = raw as { m?: unknown; t?: unknown; p?: unknown } | undefined;
-  const memKiB = Number(k?.m);
-  const timeCost = Number(k?.t);
-  const lanes = Number(k?.p);
-  if (!Number.isInteger(memKiB) || memKiB < 1024 || memKiB > 1024 * 1024) {
-    throw new HandshakeError('Peer proposed an out-of-range Argon2 memory cost');
+  const params = { memKiB: Number(k?.m), timeCost: Number(k?.t), lanes: Number(k?.p) };
+  try {
+    assertKdfParams(params);
+  } catch (err) {
+    throw new HandshakeError(`Peer proposed unusable Argon2 parameters: ${(err as Error).message}`);
   }
-  if (!Number.isInteger(timeCost) || timeCost < 1 || timeCost > 16) {
-    throw new HandshakeError('Peer proposed an out-of-range Argon2 time cost');
-  }
-  if (!Number.isInteger(lanes) || lanes < 1 || lanes > 16) {
-    throw new HandshakeError('Peer proposed an out-of-range Argon2 lane count');
-  }
-  return { memKiB, timeCost, lanes };
+  return params;
 }
 
 // ---------------------------------------------------------------------------

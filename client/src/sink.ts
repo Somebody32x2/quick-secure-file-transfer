@@ -19,11 +19,12 @@ export interface FileSink {
   readonly kind: 'disk' | 'blob';
   write(chunk: Uint8Array): Promise<void>;
   /**
-   * @returns an object URL and the Blob itself when the sink buffered in
-   * memory, nothing when it streamed to disk. The Blob lets the receiver open a
-   * bundle and offer its contents individually without re-reading the file.
+   * @returns the Blob when the sink buffered in memory, nothing when it
+   * streamed to disk. The Blob lets the receiver open a bundle and offer its
+   * contents individually without re-reading the file, and every download mints
+   * its own short-lived object URL from it via `triggerDownload`.
    */
-  close(name: string, type: string): Promise<{ url?: string; blob?: Blob }>;
+  close(name: string, type: string): Promise<{ blob?: Blob }>;
   abort(): Promise<void>;
 }
 
@@ -50,11 +51,11 @@ class BlobSink implements FileSink {
     this.pendingBytes = 0;
   }
 
-  async close(_name: string, type: string): Promise<{ url?: string; blob?: Blob }> {
+  async close(_name: string, type: string): Promise<{ blob?: Blob }> {
     this.flush();
     const blob = new Blob(this.parts as BlobPart[], { type: type || 'application/octet-stream' });
     this.parts = [];
-    return { url: URL.createObjectURL(blob), blob };
+    return { blob };
   }
 
   async abort(): Promise<void> {
@@ -72,7 +73,7 @@ class DiskSink implements FileSink {
     await this.writable.write(chunk as unknown as BufferSource);
   }
 
-  async close(): Promise<{ url?: string; blob?: Blob }> {
+  async close(): Promise<{ blob?: Blob }> {
     await this.writable.close();
     return {};
   }
@@ -109,8 +110,15 @@ export function createBlobSink(): FileSink {
 /**
  * Trigger a browser download for a completed Blob sink. Revokes the object URL
  * afterwards so a 2 GB blob is not pinned in memory for the life of the tab.
+ *
+ * The URL is minted here, per call, from the Blob - and never reused. Handing
+ * the same URL to a button that stays on screen meant the second click, more
+ * than a minute after the first, silently downloaded nothing: the revoke had
+ * already fired. The Blob is what the caller should hold on to; a URL is a
+ * short-lived handle to it.
  */
-export function triggerDownload(url: string, filename: string): void {
+export function triggerDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;

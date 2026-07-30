@@ -44,12 +44,49 @@ export const config = {
   codeAttemptWindowMs: int(process.env.CODE_ATTEMPT_WINDOW_MS, 10 * 60_000),
   codeMaxFailuresPerCode: int(process.env.CODE_MAX_FAILURES_PER_CODE, 10),
 
+  /**
+   * Reserving an upload slot is unauthenticated - it has to be, since that call
+   * is what mints the credential. So it is bounded two ways: a rate over time,
+   * and a ceiling on how many reservations one address may hold un-committed.
+   * The second is the one that matters; a reservation occupies a code from the
+   * shared registry until it commits or is swept.
+   */
+  storeInitPerIp: int(process.env.STORE_INIT_PER_IP, 60),
+  storeInitWindowMs: int(process.env.STORE_INIT_WINDOW_MS, 10 * 60_000),
+  maxUncommittedPerIp: int(process.env.MAX_UNCOMMITTED_PER_IP, 10),
+
   /** Live relay: bytes in flight the server will pass through per room. */
   relayMaxFrameBytes: int(process.env.RELAY_MAX_FRAME_BYTES, 1024 * 1024),
   liveRoomIdleMs: int(process.env.LIVE_ROOM_IDLE_MS, 15 * 60_000),
+  /** Rooms one address may hold open at once, and sockets it may open at all. */
+  liveRoomsPerIp: int(process.env.LIVE_ROOMS_PER_IP, 20),
+  maxSocketsPerIp: int(process.env.MAX_SOCKETS_PER_IP, 60),
 
-  trustProxy: process.env.TRUST_PROXY === '1',
+  /**
+   * How far to trust `X-Forwarded-For`.
+   *
+   * A number is a count of proxies between the internet and this process, and
+   * the client address is read that many hops from the *right* of the chain -
+   * the only part a client cannot forge, since each proxy appends the address it
+   * actually saw. A comma-separated list of proxy addresses is also accepted.
+   * Empty or "0" means the header is ignored entirely.
+   *
+   * Taking the leftmost value instead would let any client name its own address
+   * and walk straight through every rate limit here.
+   */
+  trustProxy: trustProxySetting(process.env.TRUST_PROXY),
   isProduction: process.env.NODE_ENV === 'production',
+
+  /**
+   * Origins allowed to open a socket, comma separated. Empty means same-origin
+   * only, worked out from the request's own Host header. Only enforced when an
+   * Origin header is present: native clients and curl do not send one, and the
+   * signalling channel carries nothing a browser's credentials would unlock.
+   */
+  allowedOrigins: (process.env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((value) => value.trim().replace(/\/+$/, ''))
+    .filter(Boolean),
 
   /**
    * Mount point, e.g. "/filetransfer". Must match the BASE_PATH the client was
@@ -68,6 +105,23 @@ export const config = {
     .map((value) => normalisePath(value))
     .filter(Boolean),
 };
+
+/**
+ * "1" -> 1 hop, "2" -> 2 hops, "10.0.0.1,10.0.0.2" -> that proxy list,
+ * blank/"0"/"false" -> do not read the header at all.
+ *
+ * "true" is accepted for compatibility and means one hop, which is what a single
+ * reverse proxy in front of this process actually is. It deliberately does not
+ * mean "believe whatever the header says".
+ */
+function trustProxySetting(raw) {
+  const value = (raw ?? '').trim();
+  if (!value || value === '0' || value.toLowerCase() === 'false') return false;
+  if (/^\d+$/.test(value)) return Number(value);
+  if (value.toLowerCase() === 'true') return 1;
+  const list = value.split(',').map((entry) => entry.trim()).filter(Boolean);
+  return list.length ? list : false;
+}
 
 /** "/filetransfer/" or "filetransfer" -> "/filetransfer"; blank -> "". */
 function normalisePath(value) {

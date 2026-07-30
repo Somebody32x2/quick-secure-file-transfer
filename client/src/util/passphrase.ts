@@ -50,6 +50,9 @@ if (WORDS.length !== WORD_LIST_SIZE) {
   throw new Error(`word list must hold exactly ${WORD_LIST_SIZE} entries, found ${WORDS.length}`);
 }
 
+/** Membership test for the strength estimator; see estimateStrength. */
+const WORD_SET = new Set(WORDS);
+
 export function generatePassphrase(words = DEFAULT_WORD_COUNT): string {
   return Array.from(randomBytes(words), (byte) => WORDS[byte]!).join('-');
 }
@@ -72,12 +75,24 @@ export function estimateStrength(passphrase: string): Strength {
     return { score: 0, bits: 0, label: 'Empty', advice: 'A passphrase is required.' };
   }
 
-  const generated = /^([a-z]+-){3,}[a-z]+$/.test(passphrase);
+  /**
+   * "Generated" means *our* format, which is only true if every token is
+   * actually one of our words.
+   *
+   * Shape alone is not evidence of entropy. Matching any hyphenated lowercase
+   * string and paying 8 bits a token credited "a-a-a-a-a-a" with 48 bits, and a
+   * ten-token string of repeats with 80 - reported to the user as "Strong". For
+   * the one control this whole app rests on, over-praising is the failure that
+   * matters, so an unrecognised token drops the passphrase to the conservative
+   * character-based estimate below.
+   */
+  const tokens = passphrase.split('-');
+  const generated = tokens.length >= 4 && tokens.every((token) => WORD_SET.has(token));
   let bits: number;
 
   if (generated) {
     // Our own format: count words at 8 bits each.
-    bits = passphrase.split('-').length * 8;
+    bits = tokens.length * 8;
   } else {
     let alphabet = 0;
     if (/[a-z]/.test(passphrase)) alphabet += 26;

@@ -11,22 +11,27 @@ import * as store from './store.js';
 
 const app = express();
 app.disable('x-powered-by');
-if (config.trustProxy) app.set('trust proxy', true);
+// Numeric hop count or proxy list - never bare `true`, which would take the
+// forgeable leftmost X-Forwarded-For value. See config.trustProxy.
+if (config.trustProxy) app.set('trust proxy', config.trustProxy);
 
 /**
  * The app must run correctly on a plain-http LAN origin, so these headers are
- * the only hardening available - no HSTS, no secure cookies, no WebCrypto.
- * Everything security-critical happens in the client's own pure-JS crypto.
+ * most of the hardening available - no secure cookies, no WebCrypto. Everything
+ * security-critical happens in the client's own pure-JS crypto.
  */
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
   res.setHeader('Content-Security-Policy', [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self'",
-    // ws:/wss: for the relay; blob: so the receiver can hand a Blob to a download.
-    "connect-src 'self' ws: wss: blob:",
+    // 'self' already covers same-origin ws:/wss: in every browser we target.
+    // Bare `ws:`/`wss:` scheme sources would match *any* host and leave the
+    // policy with no exfiltration ceiling at all. blob: so the receiver can hand
+    // a Blob to a download.
+    "connect-src 'self' blob:",
     "worker-src 'self' blob:",
     "manifest-src 'self'",
     "object-src 'none'",
@@ -39,6 +44,11 @@ app.use((_req, res, next) => {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  // Only where it cannot break the plain-http LAN case: a request that already
+  // arrived over TLS has nothing to lose by refusing to be downgraded.
+  if (req.secure) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
   next();
 });
 
@@ -52,7 +62,11 @@ app.use((_req, res, next) => {
 for (const alias of config.aliasPaths) {
   const pattern = new RegExp(`^${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(/.*)?$`);
   app.get(pattern, (req, res) => {
-    const rest = (req.params[0] ?? '').replace(/^\//, '');
+    // Every leading slash, not just one. Stripping a single slash off
+    // "//evil.example" leaves "/evil.example", which with an empty basePath
+    // reassembles into the protocol-relative "//evil.example" - an off-origin
+    // redirect out of a path that is supposed to land on this app.
+    const rest = (req.params[0] ?? '').replace(/^\/+/, '');
     res.redirect(301, `${config.basePath}/${rest}`);
   });
 }
@@ -103,12 +117,56 @@ app.use((err, _req, res, _next) => {
 
 const server = http.createServer(app);
 
+/**
+ * Refuse sockets opened by another origin's page.
+ *
+ * Socket.IO's `cors` option only governs the polling transport - WebSocket
+ * upgrades are not subject to CORS, so without this check any web page could
+ * drive this signalling channel from every one of its visitors' browsers. That
+ * turns code guessing into a distributed attack with no infrastructure.
+ *
+ * A missing Origin header is allowed through: non-browser clients do not send
+ * one, and there is nothing here that a browser's ambient credentials unlock -
+ * the protection needed is against *other pages*, which always send it.
+ */
+function originAllowed(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  if (config.allowedOrigins.length) {
+    return config.allowedOrigins.includes(origin.replace(/\/+$/, ''));
+  }
+  // Same-origin by default, judged against the host we were actually reached on.
+  const host = req.headers.host;
+  if (!host) return false;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+let refusedOrigins = 0;
+
 const io = new SocketIOServer(server, {
   // One frame plus framing overhead. Caps what a client can push at the relay.
   maxHttpBufferSize: config.relayMaxFrameBytes + 64 * 1024,
   pingTimeout: 30_000,
   pingInterval: 20_000,
-  cors: config.isProduction ? undefined : { origin: true, credentials: false },
+  // No `cors` entry: allowRequest below runs for the handshake of *both*
+  // transports, so cross-origin sockets are refused outright rather than merely
+  // being denied permission to read the reply.
+  allowRequest(req, callback) {
+    if (originAllowed(req)) return callback(null, true);
+    // Loud, because the usual cause is a proxy rewriting Host rather than an
+    // attack, and the symptom otherwise is "live transfers just do not work".
+    if (refusedOrigins++ < 20) {
+      console.warn(
+        `[socket] refused origin ${req.headers.origin} (host ${req.headers.host}). `
+        + 'If this is your own deployment, set ALLOWED_ORIGINS.',
+      );
+    }
+    return callback('origin not allowed', false);
+  },
 });
 attachLive(io);
 

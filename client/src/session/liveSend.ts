@@ -11,7 +11,8 @@
 import { ChunkSealer } from '../crypto/stream.js';
 import { SecureChannel } from '../crypto/channel.js';
 import { shortAuthString } from '../crypto/sas.js';
-import { ARGON2_DEFAULTS, deriveMaster, sessionSalt } from '../crypto/kdf.js';
+import { ARGON2_DEFAULTS, deriveMaster, SALT_LEN } from '../crypto/kdf.js';
+import { randomBytes } from '../crypto/env.js';
 import { preferredSuite } from '../crypto/aead.js';
 import { MAX_FILE_BYTES } from '../crypto/format.js';
 import { compress as gzip, compressionAvailable } from '../compress.js';
@@ -55,7 +56,21 @@ export async function liveSend(options: LiveSendOptions): Promise<void> {
     const code = await signal.host();
     onEvent({ t: 'code', code });
 
-    const salt = sessionSalt(code);
+    /**
+     * A fresh random salt per session, carried to the receiver in HELLO.
+     *
+     * It used to be derived from the room code, which made it public and one of
+     * only 10^6 possible values - the server knows the code the instant it
+     * allocates it, so it could begin grinding candidate passphrases against
+     * that exact salt before the file had even moved. Precomputing against a
+     * value nobody can predict is not possible, which is the entire job of a
+     * salt.
+     *
+     * The cost is that the receiver can no longer start Argon2id before HELLO
+     * arrives, so the derivation no longer hides behind ICE gathering. That is
+     * the right trade: it is one wait, once.
+     */
+    const salt = randomBytes(SALT_LEN);
     onEvent({ t: 'status', message: 'Deriving your key from the passphrase...' });
     const master = await deriveMaster(passphrase, salt, ARGON2_DEFAULTS);
 

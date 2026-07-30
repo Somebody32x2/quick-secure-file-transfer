@@ -37,7 +37,11 @@ COPY --from=build /app/dist ./dist
 ENV DATA_DIR=/data
 RUN mkdir -p /data && chown -R node:node /data /app
 
-# Behind Traefik, so X-Forwarded-For is what identifies a client for rate limiting.
+# Number of proxies in front of this container, not a boolean. One Traefik means
+# one hop, and the client address is read that far from the right-hand end of
+# X-Forwarded-For - the only part of it a client cannot write for itself. Raise
+# it only if you genuinely add another proxy; set it to 0 if you remove them all
+# and expose this directly.
 ENV TRUST_PROXY=1
 ENV PORT=8080
 ENV HOST=0.0.0.0

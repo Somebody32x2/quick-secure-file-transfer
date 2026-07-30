@@ -17,13 +17,18 @@
  */
 
 import { config } from './config.js';
-import { isValidCode } from './util.js';
+import { isValidCode, socketIp } from './util.js';
+import { checkCodeLookup, noteFailure, noteSuccess } from './guard.js';
 import * as codes from './codes.js';
 
-/** @type {Map<string, {code:string, hostId:string, guestId:string|null, createdAt:number, lastActivity:number}>} */
+/** @type {Map<string, {code:string, hostId:string, guestId:string|null, ownerIp:string, createdAt:number, lastActivity:number}>} */
 const rooms = new Map();
 /** @type {Map<string, string>} socket id -> room code */
 const socketRoom = new Map();
+/** @type {Map<string, number>} ip -> rooms currently hosted */
+const roomsByIp = new Map();
+/** @type {Map<string, number>} ip -> sockets currently connected */
+const socketsByIp = new Map();
 
 /** Server refuses to hold more than this per socket before giving up. */
 const MAX_SOCKET_BUFFER_BYTES = 8 * 1024 * 1024;
@@ -47,6 +52,21 @@ function closeRoom(io, room, reason, exceptSocketId = null) {
   }
   rooms.delete(room.code);
   codes.release(room.code);
+  releaseRoomSlot(room.ownerIp);
+}
+
+function takeRoomSlot(ip) {
+  const held = roomsByIp.get(ip) ?? 0;
+  if (held >= config.liveRoomsPerIp) return false;
+  roomsByIp.set(ip, held + 1);
+  return true;
+}
+
+function releaseRoomSlot(ip) {
+  const held = roomsByIp.get(ip);
+  if (!held) return;
+  if (held <= 1) roomsByIp.delete(ip);
+  else roomsByIp.set(ip, held - 1);
 }
 
 /**
@@ -89,18 +109,47 @@ function forward(io, socket, event, payload) {
 
 export function attachLive(io) {
   io.on('connection', (socket) => {
+    const ip = socketIp(socket);
+
+    /**
+     * Sockets are free to open and each one is an independent identity for
+     * anything keyed on the connection rather than the address. Capping them
+     * per address is what stops guessing being parallelised across a thousand
+     * cheap connections to sidestep the per-address throttle on `live:join`.
+     */
+    const open = (socketsByIp.get(ip) ?? 0) + 1;
+    if (open > config.maxSocketsPerIp) {
+      socket.emit('live:error', { message: 'Too many connections from this device.' });
+      socket.disconnect(true);
+      return;
+    }
+    socketsByIp.set(ip, open);
+    socket.on('disconnect', () => {
+      const held = socketsByIp.get(ip);
+      if (!held) return;
+      if (held <= 1) socketsByIp.delete(ip);
+      else socketsByIp.set(ip, held - 1);
+    });
+
     socket.on('live:host', (_payload, ack) => {
       if (socketRoom.has(socket.id)) {
         ack?.({ error: 'Already in a session' });
         return;
       }
+      // Hosting reserves a code from the shared registry and holds it for the
+      // room's idle lifetime, so one address must not be able to hoard them.
+      if (!takeRoomSlot(ip)) {
+        ack?.({ error: 'Too many open sessions from this device. Finish one first.' });
+        return;
+      }
       const code = allocateCode(socket.id);
       if (!code) {
+        releaseRoomSlot(ip);
         ack?.({ error: 'Server is busy; try again' });
         return;
       }
       rooms.set(code, {
-        code, hostId: socket.id, guestId: null,
+        code, hostId: socket.id, guestId: null, ownerIp: ip,
         createdAt: Date.now(), lastActivity: Date.now(),
       });
       socketRoom.set(socket.id, code);
@@ -109,6 +158,8 @@ export function attachLive(io) {
 
     socket.on('live:join', (payload, ack) => {
       const code = payload?.code;
+      // Checked before the throttle, exactly as the HTTP path does: a malformed
+      // code is not a guess at the space and must not consume anyone's budget.
       if (!isValidCode(code)) {
         ack?.({ error: 'Codes are six digits' });
         return;
@@ -117,16 +168,28 @@ export function attachLive(io) {
         ack?.({ error: 'Already in a session' });
         return;
       }
+      // The reason this exists: unthrottled, this event walks the entire 10^6
+      // code space in minutes, and a successful guess takes the room's only
+      // guest slot. It shares one budget with the HTTP lookup deliberately.
+      const verdict = checkCodeLookup(ip, code);
+      if (!verdict.allowed) {
+        ack?.({ error: verdict.message, retryAfterSeconds: verdict.retryAfterSeconds });
+        return;
+      }
       const room = rooms.get(code);
       if (!room) {
+        noteFailure(code);
         ack?.({ error: 'No live session with that code. Check the sender is still waiting.' });
         return;
       }
-      // One receiver at a time, per the requirement.
+      // One receiver at a time, per the requirement. The code was real either
+      // way, so this was not a guess and the attempt is refunded.
       if (room.guestId) {
+        noteSuccess(ip, code);
         ack?.({ error: 'This transfer already has a receiver connected.' });
         return;
       }
+      noteSuccess(ip, code);
       room.guestId = socket.id;
       room.lastActivity = Date.now();
       socketRoom.set(socket.id, code);

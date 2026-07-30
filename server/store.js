@@ -14,6 +14,7 @@
  * what changes if you run more than one instance.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -25,6 +26,8 @@ import * as codes from './codes.js';
 const byId = new Map();
 /** @type {Map<string, string>} code -> id */
 const byCode = new Map();
+/** @type {Map<string, number>} ip -> reservations made but not yet committed */
+const uncommittedByIp = new Map();
 
 let bytesOnDisk = 0;
 
@@ -47,11 +50,32 @@ let bytesOnDisk = 0;
 const blobPath = (id) => path.join(paths.blobs, `${id}.bin`);
 const metaPath = (id) => path.join(paths.meta, `${id}.json`);
 
+/**
+ * The temp name must be unique per *write*, not per record.
+ *
+ * Two writeMeta calls can overlap on one record with no misbehaving client at
+ * all - `beginRead().finish()` fires from a connection-close event and can land
+ * on top of an append. Sharing one temp path means the first rename consumes the
+ * file and the second gets ENOENT, which surfaces as an uncaught 500. A unique
+ * name is also what makes the rename genuinely atomic.
+ */
 async function writeMeta(record) {
-  const { reading, ...persisted } = record;
-  const tmp = path.join(paths.temp, `${record.id}.json.tmp`);
-  await fsp.writeFile(tmp, JSON.stringify(persisted));
-  await fsp.rename(tmp, metaPath(record.id));
+  // `ownerIp` is deliberately not persisted. It exists only to bound concurrent
+  // reservations in this process's memory, and writing the uploader's address
+  // next to their ciphertext would be exactly the record this app exists to
+  // avoid keeping. Restarts therefore forget the association, which is fine:
+  // the reservations it bounded are swept within the hour anyway.
+  const {
+    reading, appendLock, ownerIp, uncommittedCleared, ...persisted
+  } = record;
+  const tmp = path.join(paths.temp, `${record.id}.${crypto.randomUUID()}.tmp`);
+  try {
+    await fsp.writeFile(tmp, JSON.stringify(persisted));
+    await fsp.rename(tmp, metaPath(record.id));
+  } catch (err) {
+    await fsp.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 export async function init() {
@@ -69,6 +93,7 @@ export async function init() {
     try {
       const record = JSON.parse(await fsp.readFile(path.join(paths.meta, name), 'utf8'));
       record.reading = false;
+      record.ownerIp = 'restored';
       const stat = await fsp.stat(blobPath(record.id)).catch(() => null);
       if (!stat) { await destroy(record, 'missing blob'); continue; }
       record.size = stat.size;
@@ -100,6 +125,7 @@ function isExpired(record) {
 }
 
 async function destroy(record, _reason) {
+  clearUncommitted(record);
   record.deleted = true;
   byId.delete(record.id);
   if (byCode.get(record.code) === record.id) {
@@ -121,7 +147,7 @@ function allocateCode(id) {
 // Upload
 // ---------------------------------------------------------------------------
 
-export async function createUpload({ ttlSeconds, maxReads, declaredSize }) {
+export async function createUpload({ ttlSeconds, maxReads, declaredSize, ownerIp = 'unknown' }) {
   const ttl = Math.min(
     Math.max(Number(ttlSeconds) || config.defaultTtlSeconds, 60),
     config.maxTtlSeconds,
@@ -135,12 +161,24 @@ export async function createUpload({ ttlSeconds, maxReads, declaredSize }) {
   if (bytesOnDisk + size > config.storageQuotaBytes) {
     throw httpError(507, 'Server storage is full; try a live transfer instead');
   }
+  /**
+   * A reservation costs the caller nothing and costs the server a code from the
+   * shared registry plus two files, held until it commits or is swept an hour
+   * later. `declaredSize: 0` skips the quota check above entirely, so without
+   * this ceiling the whole 10^6 code space can be held by one unauthenticated
+   * caller at a few hundred requests a second - denying every live session and
+   * every stored upload at once.
+   */
+  if ((uncommittedByIp.get(ownerIp) ?? 0) >= config.maxUncommittedPerIp) {
+    throw httpError(429, 'Too many uploads in progress from this device. Finish or cancel one first.');
+  }
 
   const id = generateId();
   const record = {
     id,
     code: allocateCode(id),
     token: generateToken(),
+    ownerIp,
     createdAt: Date.now(),
     expiresAt: Date.now() + ttl * 1000,
     maxReads: reads,
@@ -152,11 +190,37 @@ export async function createUpload({ ttlSeconds, maxReads, declaredSize }) {
     deleted: false,
   };
 
-  await fsp.writeFile(blobPath(record.id), '');
-  await writeMeta(record);
+  try {
+    await fsp.writeFile(blobPath(record.id), '');
+    await writeMeta(record);
+  } catch (err) {
+    // Do not leak the code if the record never made it to disk.
+    codes.release(record.code);
+    throw err;
+  }
   byId.set(record.id, record);
   byCode.set(record.code, record.id);
+  uncommittedByIp.set(ownerIp, (uncommittedByIp.get(ownerIp) ?? 0) + 1);
   return record;
+}
+
+/** Release an in-progress reservation's slot exactly once. */
+function clearUncommitted(record) {
+  if (record.uncommittedCleared || record.committed) return;
+  record.uncommittedCleared = true;
+  const held = uncommittedByIp.get(record.ownerIp);
+  if (!held) return;
+  if (held <= 1) uncommittedByIp.delete(record.ownerIp);
+  else uncommittedByIp.set(record.ownerIp, held - 1);
+}
+
+/**
+ * Resolve and authorise an upload without touching its body. Lets the HTTP layer
+ * reject an unauthenticated request *before* it agrees to buffer megabytes for
+ * it.
+ */
+export function assertUploadAuth(id, token) {
+  return authorised(id, token);
 }
 
 function authorised(id, token) {
@@ -170,9 +234,34 @@ function authorised(id, token) {
  * Append one part. Parts must arrive in order; re-sending the part just
  * acknowledged is treated as a no-op so a dropped response can be retried
  * safely without duplicating bytes.
+ *
+ * Serialised per record. The index check and the append that acts on it have to
+ * be one indivisible step: validating synchronously and *then* awaiting the
+ * write lets two requests carrying the same index both pass the check before
+ * either advances `nextIndex`, and both then append. The blob silently gains a
+ * duplicate copy of that part, and the receiver meets it much later as an
+ * unexplained AEAD failure. Any client that retries a slow PUT without waiting
+ * for the first response triggers it.
  */
 export async function appendPart(id, token, index, buffer) {
+  // Authorise before queueing so a bad token is still rejected immediately
+  // rather than waiting behind someone else's upload.
   const record = authorised(id, token);
+  const previous = record.appendLock ?? Promise.resolve();
+  const mine = previous
+    .catch(() => {})
+    .then(() => appendPartLocked(record, index, buffer));
+
+  // Keep the chain alive past a rejection so one failed part cannot wedge the
+  // upload, and never leave an unhandled rejection behind.
+  record.appendLock = mine.catch(() => {});
+  return mine;
+}
+
+async function appendPartLocked(record, index, buffer) {
+  // Re-checked inside the lock: the record may have been revoked or committed
+  // while this call was queued.
+  if (record.deleted) throw httpError(404, 'Upload not found or already expired');
   if (record.committed) throw httpError(409, 'Upload already committed');
 
   if (index === record.nextIndex - 1) {
@@ -201,6 +290,11 @@ export async function appendPart(id, token, index, buffer) {
 export async function commitUpload(id, token) {
   const record = authorised(id, token);
   if (record.size === 0) throw httpError(400, 'Refusing to commit an empty upload');
+  // Let any queued append land first, so a commit racing the last part cannot
+  // freeze a size the blob has not reached yet.
+  await (record.appendLock ?? Promise.resolve());
+  if (record.deleted) throw httpError(404, 'Upload not found or already expired');
+  clearUncommitted(record);
   record.committed = true;
   await writeMeta(record);
   return record;

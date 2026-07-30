@@ -92,7 +92,7 @@ opened by the same code.
 
 | Layer | Choice |
 |---|---|
-| KDF | Argon2id, 19 MiB / t=2 / p=1, 16-byte random salt |
+| KDF | Argon2id, 19 MiB / t=2 / p=1, 16-byte random salt (in the header; in HELLO for live) |
 | Cipher | XChaCha20-Poly1305, or AES-256-GCM where WebCrypto exists |
 | Chunking | STREAM construction, 1 MiB stored / 64 KiB live |
 
@@ -249,11 +249,31 @@ All optional, all environment variables.
 | `MAX_FILE_BYTES` | `2 GiB` + slack | per-file ceiling |
 | `CODE_ATTEMPTS_PER_IP` | `20` | code lookups per window |
 | `CODE_ATTEMPT_WINDOW_MS` | `600000` | that window |
+| `CODE_MAX_FAILURES_PER_CODE` | `10` | misses before an *unallocated* code is parked |
+| `STORE_INIT_PER_IP` | `60` | upload reservations per window |
+| `STORE_INIT_WINDOW_MS` | `600000` | that window |
+| `MAX_UNCOMMITTED_PER_IP` | `10` | reservations one address may hold open |
+| `LIVE_ROOMS_PER_IP` | `20` | live sessions one address may host at once |
+| `MAX_SOCKETS_PER_IP` | `60` | concurrent signalling connections per address |
 | `ICE_SERVERS` | public STUN | JSON array of ICE servers |
-| `TRUST_PROXY` | off | honour `X-Forwarded-For` |
+| `ALLOWED_ORIGINS` | same-origin | origins permitted to open a socket, comma separated |
+| `TRUST_PROXY` | off | number of proxies in front, or a comma-separated proxy list |
 
 Successful lookups are refunded against the rate limit, so collecting many real
-transfers never throttles you — only guessing does.
+transfers never throttles you — only guessing does. The same budget covers both
+ways a code can be tried, the HTTP lookup and the `live:join` socket event, so
+opening a new connection does not hand out a fresh allowance.
+
+`TRUST_PROXY` is a **hop count**, not a boolean. `X-Forwarded-For` is appended to
+by each proxy, so only its right-hand end is trustworthy: with one reverse proxy
+in front, `TRUST_PROXY=1` reads the client one entry from the end, which is the
+address that proxy actually observed. Setting it higher than the number of
+proxies you really have lets a client forge its own identity and walk through
+every limit above; setting it to `0` ignores the header entirely.
+
+Sockets are refused when their `Origin` is not this deployment. If your proxy
+rewrites `Host`, that check will reject legitimate traffic — the server logs the
+origin and host it saw, and `ALLOWED_ORIGINS` is the escape hatch.
 
 No TURN server is configured by default. If a NAT defeats direct P2P, QSFT falls
 back to its own relay, where the payload is already double-encrypted, rather
@@ -316,7 +336,10 @@ Two things to get right or transfers break:
 
 `TRUST_PROXY=1` matters because the code-guessing rate limiter keys on client
 IP; behind a proxy without it, every request looks like it comes from the proxy
-and one abuser would throttle everybody.
+and one abuser would throttle everybody. The value is the number of proxies
+between the internet and the container — `1` for a single Traefik in front. Do
+not raise it beyond the proxies you actually operate: each extra hop is one more
+entry of `X-Forwarded-For` that a client gets to write for itself.
 
 ### Deployment notes
 

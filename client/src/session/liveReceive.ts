@@ -11,7 +11,7 @@
 import { ChunkOpener } from '../crypto/stream.js';
 import { SecureChannel } from '../crypto/channel.js';
 import { shortAuthString } from '../crypto/sas.js';
-import { ARGON2_DEFAULTS, deriveMaster, sessionSalt, type KdfParams } from '../crypto/kdf.js';
+import { deriveMaster, type KdfParams } from '../crypto/kdf.js';
 import { decodeHeader, HEADER_LEN, type FileMeta } from '../crypto/format.js';
 import { decompress } from '../compress.js';
 import { backpressuredSource } from '../chunker.js';
@@ -52,19 +52,31 @@ export async function liveReceive(options: LiveReceiveOptions): Promise<void> {
     await signal.join(code);
     onEvent({ t: 'peer', joined: true });
 
-    // Start Argon2id immediately against the salt we can predict from the code,
-    // so it overlaps the sender's HELLO rather than following it.
-    const expectedSalt = sessionSalt(code);
-    onEvent({ t: 'status', message: 'Deriving your key from the passphrase...' });
-    const precomputed = deriveMaster(passphrase, expectedSalt, ARGON2_DEFAULTS);
+    /**
+     * The salt arrives in HELLO and is random per session, so there is nothing
+     * to precompute against and the derivation cannot start early.
+     *
+     * This used to run Argon2id up front against a salt derived from the room
+     * code, overlapping it with the sender's HELLO. That overlap was only
+     * possible because the salt was predictable - which is exactly what made it
+     * useless as a salt. Memoised here so the handshake and the container header
+     * (which carry the same salt) share one derivation rather than paying for
+     * two.
+     */
+    let derived: { salt: Uint8Array; kdf: KdfParams; master: Promise<Uint8Array> } | null = null;
 
-    const deriveMasterFor = async (salt: Uint8Array, kdf: KdfParams): Promise<Uint8Array> => {
-      const sameParams = kdf.memKiB === ARGON2_DEFAULTS.memKiB
-        && kdf.timeCost === ARGON2_DEFAULTS.timeCost
-        && kdf.lanes === ARGON2_DEFAULTS.lanes;
-      if (sameParams && timingSafeEqual(salt, expectedSalt)) return precomputed;
-      // Sender chose different parameters; honour them.
-      return deriveMaster(passphrase, salt, kdf);
+    const deriveMasterFor = (salt: Uint8Array, kdf: KdfParams): Promise<Uint8Array> => {
+      if (derived
+        && timingSafeEqual(salt, derived.salt)
+        && kdf.memKiB === derived.kdf.memKiB
+        && kdf.timeCost === derived.kdf.timeCost
+        && kdf.lanes === derived.kdf.lanes) {
+        return derived.master;
+      }
+      onEvent({ t: 'status', message: 'Deriving your key from the passphrase...' });
+      const master = deriveMaster(passphrase, salt, kdf);
+      derived = { salt, kdf, master };
+      return master;
     };
 
     onEvent({ t: 'status', message: 'Running the post-quantum key exchange...' });
@@ -177,7 +189,7 @@ export async function liveReceive(options: LiveReceiveOptions): Promise<void> {
     opener.destroy();
 
     progress.report(meta.size, true);
-    const { url, blob } = await sink.close(meta.name, meta.type);
+    const { blob } = await sink.close(meta.name, meta.type);
     const savedToDisk = sink.kind === 'disk';
     sink = null;
 
@@ -185,7 +197,7 @@ export async function liveReceive(options: LiveReceiveOptions): Promise<void> {
     channel.destroy();
 
     onEvent({ t: 'status', message: 'Received and verified.' });
-    onEvent({ t: 'done', url, blob, name: meta.name, savedToDisk });
+    onEvent({ t: 'done', blob, name: meta.name, savedToDisk });
   } catch (err) {
     // Unblock the drain task so it settles instead of hanging on a dead stream.
     source?.fail(err instanceof Error ? err : new Error(String(err)));

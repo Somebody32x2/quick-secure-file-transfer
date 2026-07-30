@@ -16,13 +16,23 @@ import { SUITE_AES_256_GCM, SUITE_XCHACHA20_POLY1305, type SuiteId } from '../cl
 import { Initiator, Responder, HandshakeError } from '../client/src/crypto/kex.ts';
 import { SecureChannel, ChannelError } from '../client/src/crypto/channel.ts';
 import { shortAuthString } from '../client/src/crypto/sas.ts';
-import { deriveMaster, sessionSalt, ARGON2_DEFAULTS } from '../client/src/crypto/kdf.ts';
+import { deriveMaster, ARGON2_DEFAULTS } from '../client/src/crypto/kdf.ts';
 import { randomBytes } from '../client/src/crypto/env.ts';
 import { rechunk, toReadable, ByteCursor } from '../client/src/chunker.ts';
 import { timingSafeEqual } from '../client/src/util/bytes.ts';
+import { estimateStrength, generatePassphrase } from '../client/src/util/passphrase.ts';
 
 // Keep Argon2 cheap in tests; production defaults are exercised separately.
 const FAST_KDF = { memKiB: 1024, timeCost: 1, lanes: 1 };
+
+/**
+ * Any fixed 16-byte salt. These tests only need both sides to derive against
+ * the same value; the salt's contents are irrelevant to what they assert. It is
+ * a local helper rather than something exported from the app on purpose -
+ * production salts are random, and nothing shipped should offer a derivable one.
+ */
+const testSalt = (seed: string): Uint8Array =>
+  Uint8Array.from({ length: 16 }, (_, i) => (seed.charCodeAt(i % seed.length) + i * 7) & 0xff);
 
 const meta = (over: Partial<FileMeta> = {}): FileMeta => ({
   name: 'report.pdf', size: 1234, type: 'application/pdf', lastModified: 1700000000000, ...over,
@@ -75,7 +85,82 @@ test('header rejects bad magic and hostile KDF parameters', () => {
   new DataView(hugeMem.buffer).setUint32(8, 4 * 1024 * 1024, false);
   assert.throws(() => decodeHeader(hugeMem), /Argon2 memory/);
 
+  /**
+   * Bounding each field alone is not enough - the cost is their product.
+   * m=1 GiB with t=16 and p=16 passed every individual limit while costing
+   * minutes of CPU and a gigabyte of memory, imposed by a peer, before anything
+   * had been authenticated.
+   */
+  const expensive = good.slice();
+  const view = new DataView(expensive.buffer);
+  view.setUint32(8, 128 * 1024, false); // exactly the per-field memory ceiling
+  expensive[12] = 16;                   // t
+  expensive[13] = 16;                   // p
+  assert.throws(() => decodeHeader(expensive), /cost too much/);
+
+  // Something a real sender might legitimately choose still opens.
+  const stronger = good.slice();
+  new DataView(stronger.buffer).setUint32(8, 65536, false);
+  stronger[12] = 3;
+  stronger[13] = 1;
+  assert.equal(decodeHeader(stronger).kdf.memKiB, 65536);
+
   assert.throws(() => decodeHeader(good.slice(0, 32)), /Truncated/);
+});
+
+test('a peer cannot impose ruinous Argon2 parameters over the handshake', async () => {
+  // HELLO is read before its MAC can be checked - the MAC is keyed by a value
+  // derived using these very parameters - so they are unauthenticated input to
+  // an expensive operation and have to be bounded before anything is spent.
+  const salt = testSalt('cost');
+  const master = await deriveMaster('pw', salt, FAST_KDF);
+  const initiator = Initiator.start(master, salt, FAST_KDF, SUITE_XCHACHA20_POLY1305);
+
+  for (const kdf of [
+    { m: 1024 * 1024, t: 16, p: 16 }, // the old ceiling: ~1 GiB, minutes of CPU
+    { m: 131072, t: 16, p: 16 },      // each field legal, product is not
+    { m: 512, t: 2, p: 1 },           // below the floor
+  ]) {
+    assert.throws(
+      () => Responder.parseHello({ ...initiator.hello, kdf }),
+      /unusable Argon2 parameters/,
+      `should reject ${JSON.stringify(kdf)}`,
+    );
+  }
+
+  // The shipped defaults, and a stronger-but-sane choice, are still accepted.
+  assert.doesNotThrow(() => Responder.parseHello({
+    ...initiator.hello,
+    kdf: { m: ARGON2_DEFAULTS.memKiB, t: ARGON2_DEFAULTS.timeCost, p: ARGON2_DEFAULTS.lanes },
+  }));
+  assert.doesNotThrow(() => Responder.parseHello({ ...initiator.hello, kdf: { m: 65536, t: 4, p: 1 } }));
+});
+
+test('the strength estimator does not mistake shape for entropy', () => {
+  // The old regex treated any hyphenated lowercase string as a generated
+  // passphrase worth 8 bits a token, with no check that the tokens were words.
+  // "zz-zz-..." scored 80 bits and was reported to the user as Strong.
+  for (const junk of ['a-a-a-a-a-a', 'zz-zz-zz-zz-zz-zz-zz-zz-zz-zz', 'aaa-aaa-aaa-aaa']) {
+    const strength = estimateStrength(junk);
+    assert.notEqual(strength.label, 'Strong', `"${junk}" must not be called Strong`);
+    assert.ok(strength.bits < 50, `"${junk}" scored ${strength.bits} bits`);
+  }
+
+  // A real generated passphrase is still credited at 8 bits per word.
+  const generated = generatePassphrase(6);
+  assert.equal(estimateStrength(generated).bits, 48, `"${generated}" should be 48 bits`);
+  assert.equal(estimateStrength(generatePassphrase(9)).bits, 72);
+
+  // Tokens that are not ours fall through to the character estimate instead of
+  // being counted as words: four unrecognised tokens must not score 4 x 8.
+  const notOurWords = 'correct-horse-battery-staple';
+  assert.notEqual(estimateStrength(notOurWords).bits, 32,
+    'unrecognised tokens must not be priced as if they came from the word list');
+
+  // And swapping a single token for a non-word drops it off the word path.
+  const words = generatePassphrase(6).split('-');
+  const tampered = [...words.slice(0, 5), 'zzzzzz'].join('-');
+  assert.notEqual(estimateStrength(tampered).bits, 48);
 });
 
 for (const [label, suite] of [
@@ -185,7 +270,7 @@ test('a downgraded header is rejected because the header is authenticated', asyn
 // ---------------------------------------------------------------------------
 
 async function handshake(senderPass: string, receiverPass: string, code = '123456') {
-  const salt = sessionSalt(code);
+  const salt = testSalt(code);
   const masterI = await deriveMaster(senderPass, salt, FAST_KDF);
   const masterR = await deriveMaster(receiverPass, salt, FAST_KDF);
   const initiator = Initiator.start(masterI, salt, FAST_KDF, SUITE_XCHACHA20_POLY1305);
@@ -231,7 +316,7 @@ test('mismatched passphrases abort the handshake', async () => {
 });
 
 test('a relay that swaps in its own keys is caught by the transcript MAC', async () => {
-  const salt = sessionSalt('654321');
+  const salt = testSalt('654321');
   const master = await deriveMaster('pw', salt, FAST_KDF);
   const initiator = Initiator.start(master, salt, FAST_KDF, SUITE_XCHACHA20_POLY1305);
 
@@ -243,7 +328,7 @@ test('a relay that swaps in its own keys is caught by the transcript MAC', async
 });
 
 test('malformed handshake fields are rejected, not coerced', async () => {
-  const salt = sessionSalt('111111');
+  const salt = testSalt('111111');
   const master = await deriveMaster('pw', salt, FAST_KDF);
   const initiator = Initiator.start(master, salt, FAST_KDF, SUITE_XCHACHA20_POLY1305);
   const responder = Responder.respond(initiator.hello, master);
