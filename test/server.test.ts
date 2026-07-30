@@ -226,7 +226,15 @@ test('read budget deletes the blob and frees its code', async () => {
   const second = await fetch(`${API}/store/${committed.code}`);
   assert.equal(second.status, 404, 'a one-read transfer must be gone after collection');
 
-  const files = await fs.readdir(path.join(dataDir, 'blobs'));
+  // The record leaves memory before the unlink is awaited, so a 404 does not by
+  // itself mean the bytes are gone yet. Poll rather than assume: asserting
+  // straight after the 404 made this test fail intermittently for a reason that
+  // had nothing to do with what it is testing.
+  const blobs = path.join(dataDir, 'blobs');
+  for (let waited = 0; waited < 2000 && (await fs.readdir(blobs)).length > 0; waited += 25) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  const files = await fs.readdir(blobs);
   assert.equal(files.length, 0, 'the blob must be removed from disk, not just hidden');
 });
 

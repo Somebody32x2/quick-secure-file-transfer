@@ -124,6 +124,35 @@ function isExpired(record) {
   return false;
 }
 
+/**
+ * Remove a file, insisting a little.
+ *
+ * `rm` is fine with a file that is already gone, but not with one whose handle
+ * someone still holds - which Windows reports as EBUSY or EPERM, and which a
+ * virus scanner or search indexer can cause transiently on any file.
+ *
+ * This used to swallow every such failure, and that is the worst place to be
+ * quiet: by the time we get here the record is out of the map, so the sweeper -
+ * which walks the map - can never revisit that path. One silent failure means
+ * the ciphertext of a deleted transfer lives on disk until someone removes it
+ * by hand. Retrying costs nothing, and saying so out loud when it still cannot
+ * finish means an orphan is at least visible in the log.
+ */
+async function removeFile(target) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fsp.rm(target, { force: true });
+      return true;
+    } catch (err) {
+      if (attempt >= 4) {
+        console.error(`[store] could not remove ${target}: ${err.code ?? err}`);
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+    }
+  }
+}
+
 async function destroy(record, _reason) {
   clearUncommitted(record);
   record.deleted = true;
@@ -133,8 +162,8 @@ async function destroy(record, _reason) {
     codes.release(record.code);
   }
   bytesOnDisk = Math.max(0, bytesOnDisk - (record.size ?? 0));
-  await fsp.rm(blobPath(record.id), { force: true }).catch(() => {});
-  await fsp.rm(metaPath(record.id), { force: true }).catch(() => {});
+  await removeFile(blobPath(record.id));
+  await removeFile(metaPath(record.id));
 }
 
 function allocateCode(id) {

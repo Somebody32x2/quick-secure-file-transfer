@@ -21,6 +21,8 @@ import { randomBytes } from '../client/src/crypto/env.ts';
 import { rechunk, toReadable, ByteCursor } from '../client/src/chunker.ts';
 import { timingSafeEqual } from '../client/src/util/bytes.ts';
 import { estimateStrength, generatePassphrase } from '../client/src/util/passphrase.ts';
+import { MessagePump } from '../client/src/session/pump.ts';
+import { encodeMessage, wrapFrame, MSG_DONE } from '../client/src/session/protocol.ts';
 
 // Keep Argon2 cheap in tests; production defaults are exercised separately.
 const FAST_KDF = { memKiB: 1024, timeCost: 1, lanes: 1 };
@@ -134,6 +136,48 @@ test('a peer cannot impose ruinous Argon2 parameters over the handshake', async 
     kdf: { m: ARGON2_DEFAULTS.memKiB, t: ARGON2_DEFAULTS.timeCost, p: ARGON2_DEFAULTS.lanes },
   }));
   assert.doesNotThrow(() => Responder.parseHello({ ...initiator.hello, kdf: { m: 65536, t: 4, p: 1 } }));
+});
+
+test('a message already received survives the link closing right behind it', async () => {
+  /**
+   * The reported symptom: the sender says the other device disconnected, when
+   * in fact it finished and said so.
+   *
+   * A receiver that completes sends MSG_DONE and then immediately tears its
+   * connection down. Both events reach the sender in order - but the frame is
+   * decrypted asynchronously while the close notification is delivered
+   * synchronously, so the close overtakes the message that arrived before it
+   * and the sender is told the peer vanished instead of being handed its
+   * confirmation.
+   */
+  const { initiatorSession, responderSession } = await handshake('pw', 'pw');
+  const far = await SecureChannel.create(responderSession, 'responder');
+  const near = await SecureChannel.create(initiatorSession, 'initiator');
+
+  let deliver: (frame: Uint8Array) => void = () => {};
+  let close: (reason: string) => void = () => {};
+  const link = {
+    kind: 'relay' as const,
+    detail: '',
+    send: async () => {},
+    onFrame(cb: (f: Uint8Array) => void) { deliver = cb; },
+    onClose(cb: (r: string) => void) { close = cb; },
+    close() {},
+  };
+
+  const pump = new MessagePump(link, near);
+  const pending = pump.next();
+
+  // Exactly what a completing receiver does: the confirmation, then the
+  // teardown, back to back with no chance to breathe in between.
+  deliver(wrapFrame(await far.seal(encodeMessage(MSG_DONE)), false));
+  close('the other device disconnected');
+
+  const message = await pending;
+  assert.equal(message.type, MSG_DONE, 'the confirmation must not be lost to the close that followed it');
+
+  // And a close with nothing in flight must still surface as a failure.
+  await assert.rejects(() => pump.next(), /the other device disconnected/);
 });
 
 test('the strength estimator does not mistake shape for entropy', () => {
