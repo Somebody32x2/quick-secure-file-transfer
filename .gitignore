@@ -9,3 +9,6 @@ data/
 .env
 .env.local
 .vite/
+
+# Local editor/agent run configuration
+.claude/launch.json
