@@ -30,6 +30,18 @@ export const config = {
   defaultTtlSeconds: int(process.env.DEFAULT_TTL_SECONDS, 24 * 60 * 60),
   /** Uploads that never commit are swept after this long. */
   incompleteUploadTtlSeconds: int(process.env.INCOMPLETE_UPLOAD_TTL_SECONDS, 60 * 60),
+  /**
+   * ...and much sooner if they simply stopped, measured from the last part
+   * received rather than from when the reservation was made.
+   *
+   * An upload in progress touches this constantly; one whose tab was closed
+   * never touches it again. Without an idle rule an abandoned reservation holds
+   * its code - and a slot against the per-address ceiling - for the full hour
+   * above, so a handful of cancelled attempts locks that address out of stored
+   * transfers entirely. Generous enough that even a painfully slow link keeps
+   * its upload alive between parts.
+   */
+  incompleteUploadIdleSeconds: int(process.env.INCOMPLETE_UPLOAD_IDLE_SECONDS, 15 * 60),
   sweepIntervalMs: int(process.env.SWEEP_INTERVAL_MS, 60_000),
 
   maxReadsLimit: int(process.env.MAX_READS_LIMIT, 100),

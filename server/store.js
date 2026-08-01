@@ -118,8 +118,14 @@ function isExpired(record) {
   if (record.deleted) return true;
   if (Date.now() >= record.expiresAt) return true;
   if (record.committed && record.reads >= record.maxReads) return true;
-  if (!record.committed && Date.now() - record.createdAt > config.incompleteUploadTtlSeconds * 1000) {
-    return true;
+  if (!record.committed) {
+    if (Date.now() - record.createdAt > config.incompleteUploadTtlSeconds * 1000) return true;
+    // Stopped, rather than merely slow. An upload that is still going touches
+    // lastActivity on every part; one whose sender walked away never will, and
+    // holding its code and its slot against the per-address ceiling for the full
+    // hour above is what turns a few cancelled attempts into a lockout.
+    const idleSince = record.lastActivity ?? record.createdAt;
+    if (Date.now() - idleSince > config.incompleteUploadIdleSeconds * 1000) return true;
   }
   return false;
 }
@@ -199,7 +205,8 @@ export async function createUpload({ ttlSeconds, maxReads, declaredSize, ownerIp
    * every stored upload at once.
    */
   if ((uncommittedByIp.get(ownerIp) ?? 0) >= config.maxUncommittedPerIp) {
-    throw httpError(429, 'Too many uploads in progress from this device. Finish or cancel one first.');
+    throw httpError(429, 'Too many uploads already in progress from this device. '
+      + 'Finish or cancel one, or wait a few minutes for abandoned ones to clear.');
   }
 
   const id = generateId();
@@ -209,6 +216,7 @@ export async function createUpload({ ttlSeconds, maxReads, declaredSize, ownerIp
     token: generateToken(),
     ownerIp,
     createdAt: Date.now(),
+    lastActivity: Date.now(),
     expiresAt: Date.now() + ttl * 1000,
     maxReads: reads,
     reads: 0,
@@ -311,6 +319,7 @@ async function appendPartLocked(record, index, buffer) {
   await fsp.appendFile(blobPath(record.id), buffer);
   record.size += buffer.length;
   record.nextIndex = index + 1;
+  record.lastActivity = Date.now();
   bytesOnDisk += buffer.length;
   await writeMeta(record);
   return { size: record.size, nextIndex: record.nextIndex, duplicate: false };

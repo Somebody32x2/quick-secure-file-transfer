@@ -531,6 +531,53 @@ test('one address cannot hoard upload reservations', async () => {
   assert.ok(created <= 12, `expected the uncommitted ceiling to bite, ${created} got through`);
 });
 
+test('abandoned uploads stop counting against you once they go idle', async () => {
+  // The ceiling above is only safe to impose if it lets go again. An upload that
+  // is abandoned - tab closed, transfer cancelled - is never committed and never
+  // revoked, so counting it for the full incomplete-upload hour meant a handful
+  // of cancelled attempts locked an address out of stored transfers entirely.
+  // The idle server below sweeps them almost immediately instead.
+  const idlePort = 8139;
+  const idleApi = `http://127.0.0.1:${idlePort}/api`;
+  const idleData = await fs.mkdtemp(path.join(os.tmpdir(), 'qsft-idle-test-'));
+  const idle = spawn(process.execPath, ['server/index.js'], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PORT: String(idlePort),
+      DATA_DIR: idleData,
+      HOST: '127.0.0.1',
+      MAX_UNCOMMITTED_PER_IP: '3',
+      INCOMPLETE_UPLOAD_IDLE_SECONDS: '1',
+      SWEEP_INTERVAL_MS: '200',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await waitFor(`${idleApi}/health`);
+    const reserve = () => fetch(`${idleApi}/store/init`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ttlSeconds: 600, maxReads: 1, declaredSize: 1024 }),
+    });
+
+    for (let i = 0; i < 3; i++) assert.equal((await reserve()).status, 201);
+    assert.equal((await reserve()).status, 429, 'the ceiling must hold while uploads are live');
+
+    // Nobody sent a byte, so they are abandoned; the slots must come back.
+    await new Promise((r) => setTimeout(r, 2000));
+    assert.equal(
+      (await reserve()).status, 201,
+      'abandoned reservations must free their slot, or one bad afternoon locks a user out',
+    );
+  } finally {
+    idle.kill();
+    await new Promise((r) => setTimeout(r, 200));
+    await fs.rm(idleData, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 test('sockets are same-origin only, without shutting out real clients', async () => {
   // Socket.IO's `cors` option governs polling only - WebSocket upgrades are not
   // subject to CORS - so without an explicit check any page could drive this
