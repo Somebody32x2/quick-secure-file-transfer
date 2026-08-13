@@ -11,7 +11,19 @@
  * otherwise), so paths are appended without one.
  */
 
-export const BASE: string = import.meta.env.BASE_URL || '/';
+/**
+ * Read through an optional chain so this module also loads outside Vite.
+ *
+ * Vite still replaces `import.meta.env` with its own object, so a subpath build
+ * bakes in exactly what it always did (there is a test that asserts this). What
+ * changes is that under plain Node - where `import.meta.env` is undefined - this
+ * no longer throws on import. Every transport module reaches this file
+ * transitively, so the bare property read made the whole session layer
+ * unloadable outside a browser bundle, and with it untestable end to end.
+ */
+export const BASE: string = (import.meta as ImportMeta & {
+  env?: { BASE_URL?: string };
+}).env?.BASE_URL || '/';
 
 /** Absolute path to an API endpoint. `api('config')` -> "/filetransfer/api/config". */
 export function api(path: string): string {

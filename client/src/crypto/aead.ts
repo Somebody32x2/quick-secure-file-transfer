@@ -117,12 +117,28 @@ class WebCryptoGcm implements AeadContext {
   destroy(): void { /* CryptoKey material is not reachable from JS */ }
 }
 
-/** WebCrypto rejects Uint8Array views with a non-zero offset in some engines. */
+/**
+ * WebCrypto rejects Uint8Array views with a non-zero offset in some engines, so
+ * hand it an ArrayBuffer holding exactly these bytes and nothing else.
+ *
+ * The copy is written out rather than taken from `.slice().buffer`. `slice` only
+ * copies for a genuine Uint8Array; on a Node `Buffer` - which is a Uint8Array,
+ * and is what socket.io hands a non-browser client - `slice` is an alias for
+ * `subarray` and returns a view over the same memory. `.buffer` on that view is
+ * the whole pooled 8 KiB allocation, so a 48-byte frame arrived at
+ * `crypto.subtle.decrypt` as 8 KiB of unrelated bytes and every frame failed
+ * authentication. Browsers never hit it, which is exactly why it is worth not
+ * depending on: the contract here is "an ArrayBuffer of these bytes", and it
+ * should not quietly rest on which flavour of Uint8Array the caller happens to
+ * hold.
+ */
 function bufferOf(u8: Uint8Array): ArrayBuffer {
   if (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength) {
     return u8.buffer as ArrayBuffer;
   }
-  return u8.slice().buffer as ArrayBuffer;
+  const exact = new Uint8Array(u8.byteLength);
+  exact.set(u8);
+  return exact.buffer;
 }
 
 /**

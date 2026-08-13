@@ -9,9 +9,23 @@ import { guardCodeLookup, noteFailure, noteSuccess } from './guard.js';
 const initLimiter = new RateLimiter(config.storeInitPerIp, config.storeInitWindowMs);
 setInterval(() => initLimiter.sweep(), 60_000).unref();
 
-/** Loopback only - the container healthcheck, not the internet. */
+/**
+ * Loopback only - the container healthcheck, not the internet.
+ *
+ * Judged on the *resolved* client address, not the socket peer. A reverse proxy
+ * on the same host - nginx or Caddy in front of `127.0.0.1:8080`, which is the
+ * ordinary way to deploy this - makes the socket peer loopback for every request
+ * that arrives, including ones from the internet. Reading the peer directly
+ * therefore handed the detailed readout to everybody on exactly the deployments
+ * it was meant to protect.
+ *
+ * `clientIp` counts proxy hops from the right, so a client cannot reach this by
+ * claiming `X-Forwarded-For: 127.0.0.1`: the trusted proxy appends the address
+ * it actually saw, and that is the one read. With no proxy configured this is
+ * the socket peer, unchanged.
+ */
 function isLocal(req) {
-  const addr = req.socket?.remoteAddress ?? '';
+  const addr = clientIp(req);
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
 
@@ -168,7 +182,22 @@ export function createRouter() {
     const ip = clientIp(req);
     guardCodeLookup(ip, code);
 
-    const session = store.beginRead(code);
+    /**
+     * A code that is real but busy is not a guess.
+     *
+     * `beginRead` throws 409 when another reader holds the blob, and that threw
+     * straight past the refund below - so two people collecting a multi-read
+     * transfer, or one person retrying after a dropped connection, spent the
+     * guess budget on a code they demonstrably already had. Twenty of those and
+     * a legitimate receiver is locked out of their own transfer.
+     */
+    let session;
+    try {
+      session = store.beginRead(code);
+    } catch (err) {
+      if (err.status === 409) noteSuccess(ip, code);
+      throw err;
+    }
     if (!session) {
       noteFailure(code);
       throw httpError(404, 'No transfer with that code. It may have expired or already been collected.');

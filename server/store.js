@@ -92,6 +92,20 @@ export async function init() {
     if (!name.endsWith('.json')) continue;
     try {
       const record = JSON.parse(await fsp.readFile(path.join(paths.meta, name), 'utf8'));
+      /**
+       * A sidecar that still says `deleted` is debris: `destroy` sets the flag
+       * and then removes both files, so one surviving means that removal failed
+       * (a handle held open, a scanner, a crash in between). Finish the job here
+       * rather than handing it to `destroy`, which now no-ops on an
+       * already-deleted record - and never restore it, because whatever set the
+       * flag was an expiry or a revocation and the sender is entitled to expect
+       * those to stick.
+       */
+      if (record.deleted) {
+        await removeFile(blobPath(record.id));
+        await removeFile(metaPath(record.id));
+        continue;
+      }
       record.reading = false;
       record.ownerIp = 'restored';
       const stat = await fsp.stat(blobPath(record.id)).catch(() => null);
@@ -159,7 +173,22 @@ async function removeFile(target) {
   }
 }
 
+/**
+ * Idempotent on purpose: two callers can genuinely reach the same record.
+ *
+ * `beginRead().finish()` clears `reading` *before* it awaits its own destroy, and
+ * the sweeper walks a snapshot of the map taken before that - so a read that
+ * exhausts its budget while a sweep is in flight gets destroyed twice, and
+ * `bytesOnDisk` is decremented twice for one blob. The counter then reads lower
+ * than the truth for the life of the process, the storage quota stops binding,
+ * and the disk fills past the ceiling it was supposed to enforce. `revoke`
+ * racing the sweeper does the same thing.
+ *
+ * `byCode`/`codes` were already guarded against the second pass; the byte count
+ * was not.
+ */
 async function destroy(record, _reason) {
+  if (record.deleted) return;
   clearUncommitted(record);
   record.deleted = true;
   byId.delete(record.id);

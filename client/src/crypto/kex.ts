@@ -87,7 +87,14 @@ export interface SessionKeys {
 }
 
 export class HandshakeError extends Error {
-  constructor(message: string) {
+  /**
+   * Machine-readable reason, set only where the cause is unambiguous.
+   *
+   * `'auth'` means a transcript MAC did not verify. The session layer forwards
+   * that one fact to the peer so the device that is *not* holding the failing
+   * MAC can still say what went wrong; see runInitiatorHandshake.
+   */
+  constructor(message: string, readonly code?: 'auth') {
     super(message);
     this.name = 'HandshakeError';
   }
@@ -227,6 +234,7 @@ export class Initiator {
       throw new HandshakeError(
         'Handshake authentication failed. Either the passphrases do not match, '
         + 'or someone is intercepting this connection.',
+        'auth',
       );
     }
 
@@ -326,6 +334,7 @@ export class Responder {
       throw new HandshakeError(
         'Sender failed authentication. Either the passphrases do not match, '
         + 'or someone is intercepting this connection.',
+        'auth',
       );
     }
     wipe(this.authKey);

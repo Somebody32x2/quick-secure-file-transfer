@@ -271,6 +271,38 @@ test('only one download at a time is served', async () => {
   await reader.cancel();
 });
 
+test('a code that is real but busy does not eat the guess budget', async () => {
+  // Large enough that one `read()` cannot drain it: the point is to still be
+  // holding the single-reader lock while the collisions below happen.
+  const payload = Buffer.alloc(8 * 1024 * 1024, 5);
+  const { committed } = await uploadBlob(payload, { maxReads: 5 });
+  assert.match(committed.code, /^\d{6}$/, 'upload should have committed');
+
+  const held = await fetch(`${API}/store/${committed.code}`);
+  assert.equal(held.status, 200);
+  const reader = held.body!.getReader();
+  await reader.read(); // hold the single-reader lock open
+
+  /**
+   * Colliding with another reader is a 409, and that used to be thrown straight
+   * past the refund below - so a receiver retrying a busy transfer spent the
+   * enumeration budget on a code they demonstrably already had. This instance
+   * allows 8 attempts, so twelve collisions would have locked them out of their
+   * own transfer.
+   */
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const busy = await fetch(`${API}/store/${committed.code}`);
+    assert.equal(busy.status, 409, `attempt ${attempt} should report "busy", not throttling`);
+  }
+
+  await reader.cancel();
+
+  // Still collectable: none of that counted against the real receiver.
+  const collected = await fetch(`${API}/store/${committed.code}`);
+  assert.equal(collected.status, 200, 'the legitimate receiver must not have been locked out');
+  assert.equal(Buffer.from(await collected.arrayBuffer()).length, payload.length);
+});
+
 test('the sender can revoke before expiry', async () => {
   const { ticket, committed } = await uploadBlob(Buffer.from('x'.repeat(500)), { maxReads: 5 });
 
@@ -612,6 +644,34 @@ test('sockets are same-origin only, without shutting out real clients', async ()
     'a lookalike host must not pass as a prefix match',
   );
   assert.equal(await attempt('null'), 'refused', 'a sandboxed iframe must not connect');
+});
+
+test('the health readout is loopback-only, judged on the real client address', async () => {
+  // The healthcheck genuinely reaching us over loopback still gets the detail.
+  const local = await (await fetch(`${API}/health`)).json();
+  assert.equal(local.ok, true);
+  assert.ok('bytesOnDisk' in local, 'the container healthcheck needs the detail');
+
+  /**
+   * The instance that trusts a proxy is the interesting one. A reverse proxy on
+   * the same host - nginx or Caddy in front of 127.0.0.1, the ordinary way to
+   * deploy this - makes the socket peer loopback for *every* request, including
+   * ones from the internet. Reading the peer directly published the item count
+   * and bytes-on-disk of a privacy tool to anyone who asked.
+   */
+  const remote = await (await fetch(`${PROXY_API}/health`, {
+    headers: { 'X-Forwarded-For': '203.0.113.9, 198.51.100.4, 127.0.0.1' },
+  })).json();
+  assert.equal(remote.ok, true, 'liveness must still be answerable from outside');
+  assert.ok(!('bytesOnDisk' in remote), 'a remote client must not see storage figures');
+  assert.ok(!('items' in remote), 'a remote client must not see the item count');
+
+  // And claiming to be loopback does not get you in: the trusted proxy appends
+  // the address it actually saw, and that is the one read.
+  const spoofed = await (await fetch(`${PROXY_API}/health`, {
+    headers: { 'X-Forwarded-For': '127.0.0.1, 198.51.100.4, 127.0.0.1' },
+  })).json();
+  assert.ok(!('bytesOnDisk' in spoofed), 'a forged loopback claim must not unlock the detail');
 });
 
 test('security headers are set on the app response', async () => {

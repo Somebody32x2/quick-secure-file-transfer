@@ -212,6 +212,11 @@ export class TransferScreen {
       // A bundle is worth opening rather than dumping in the downloads folder,
       // so check before triggering anything.
       if (looksLikeZip(name, blob.type)) {
+        // Same completion signals as every other path: this used to return
+        // early, leaving the status line reading "Receiving..." on a finished
+        // transfer and never announcing the result to a screen reader.
+        this.statusLine.textContent = '';
+        announce('Transfer complete and verified');
         void this.showArchiveContents(blob, name);
         this.renderActions();
         return;
