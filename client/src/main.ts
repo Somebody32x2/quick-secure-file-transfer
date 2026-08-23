@@ -22,6 +22,7 @@ import { liveSend } from './session/liveSend.js';
 import { liveReceive } from './session/liveReceive.js';
 import { storedSend, storedReceive } from './session/stored.js';
 import { resolveCode } from './transport/api.js';
+import { takeHandoff } from './util/handoff.js';
 import type { TransferEvent } from './session/events.js';
 
 const root = document.getElementById('app')!;
@@ -284,6 +285,9 @@ function renderSend(): void {
 
 const receiveState = { code: '', passphrase: '' };
 
+/** Set when the fields were filled in by scanning the sender's QR code. */
+let arrivedByScan = false;
+
 function renderReceive(): void {
   const codeInput = el('input', {
     type: 'text',
@@ -328,7 +332,9 @@ function renderReceive(): void {
         showGenerator: false,
         onChange: (value) => { receiveState.passphrase = value; refreshEnabled(); },
       }),
-      el('p', { class: 'hint', text: 'The passphrase must match exactly what the sender typed. QSFT works out on its own whether someone is waiting live or the file is stored.' }),
+      arrivedByScan
+        ? el('p', { class: 'hint', text: 'Filled in from the code you scanned. The passphrase is hidden — reveal it if you want to check it before collecting.' })
+        : el('p', { class: 'hint', text: 'The passphrase must match exactly what the sender typed. QSFT works out on its own whether someone is waiting live or the file is stored.' }),
       el('div', { style: 'margin-top:1rem' }, start),
     ),
   );
@@ -339,11 +345,13 @@ function renderReceive(): void {
 function runTransfer(
   title: string,
   work: (screen: TransferScreen, onEvent: (e: TransferEvent) => void, abort: AbortSignal) => Promise<void>,
+  passphrase?: string,
 ): void {
   const controller = new AbortController();
   inTransfer = true;
   const screen = new TransferScreen({
     title,
+    passphrase,
     onCancel: () => {
       controller.abort();
       screen.showError('Cancelled.');
@@ -369,7 +377,7 @@ function startSend(): void {
   if (method === 'live') {
     runTransfer('Sending live', async (_screen, onEvent, abort) => {
       await liveSend({ source, passphrase, compress, onEvent, abort });
-    });
+    }, passphrase);
   } else {
     runTransfer('Uploading', async (screen, onEvent, abort) => {
       const result = await storedSend({
@@ -382,7 +390,7 @@ function startSend(): void {
         abort,
       });
       screen.showStoredResult(result.code, result.expiresAt, result.maxReads, result.revoke);
-    });
+    }, passphrase);
   }
 }
 
@@ -426,8 +434,32 @@ function enforceCanonicalPath(): void {
   location.replace(BASE + location.search + location.hash);
 }
 
+/**
+ * Pick up a scanned handoff.
+ *
+ * Runs after the canonical-path correction, which carries the fragment across
+ * the redirect, so a scan of an alias URL still arrives with its code intact.
+ * Nothing starts on its own: the fields are filled in and the user still taps
+ * collect, because a link that begins pulling a file the moment it is opened is
+ * not something to build.
+ */
+function applyHandoff(): boolean {
+  const handoff = takeHandoff();
+  if (!handoff) return false;
+  mode = 'receive';
+  receiveState.code = handoff.code;
+  receiveState.passphrase = handoff.passphrase;
+  arrivedByScan = true;
+  return true;
+}
+
 enforceCanonicalPath();
+applyHandoff();
 initPwa();
+// A scan that lands on an app which is already open changes only the fragment,
+// which is not a page load - the installed app and any tab left open on QSFT
+// both arrive here instead of through boot.
+addEventListener('hashchange', () => { if (applyHandoff()) render(); });
 // An install offer or a waiting update can arrive at any time; redraw for it,
 // unless a transfer is on screen.
 onPwaChange(render);

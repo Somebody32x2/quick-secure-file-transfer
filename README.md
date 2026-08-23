@@ -21,7 +21,7 @@ For development, `npm run dev` runs the API on `:8080` and Vite on `:5173` with
 `--host`, so a phone on the same network can reach it.
 
 ```bash
-npm test           # 77 tests: crypto, container, zip bundling, degraded hosts, server, service worker
+npm test           # 116 tests: crypto, container, zip bundling, QR, degraded hosts, server, service worker
 npm run icons      # regenerate the PWA icon set
 ```
 
@@ -36,6 +36,20 @@ endpoint.
 Pick a file, type a passphrase, and choose how to send it. The other device
 enters the 6-digit code and the same passphrase. QSFT works out on its own
 whether that code is a live sender or a stored blob.
+
+Typing a passphrase on a phone keyboard is where transfers get abandoned, so the
+sender's code panel also offers a **QR code** carrying both halves. The other
+device scans it, lands on this same deployment with the code and passphrase
+filled in, and taps collect. The link puts them in the URL *fragment*, which
+browsers never send to a server, and the app strips it out of the address bar
+and session history as soon as it has read it. Nothing starts on its own.
+
+That symbol is the whole secret, not just the code, so it stays hidden behind a
+button and is removed from the page again when hidden. It is meant to be scanned
+off your screen by someone standing next to you — a screenshot of it in a chat
+is the passphrase in that chat. The encoder is hand-rolled for the same reason
+the rest of this is: a QR library would be a dependency that gets to see the
+passphrase.
 
 Selecting several files bundles them into one ZIP as they stream, so a
 multi-file send is still one transfer, one code, and one "decrypted and

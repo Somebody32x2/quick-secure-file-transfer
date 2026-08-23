@@ -1,6 +1,7 @@
 /** Reusable panel modules. */
 
 import { el } from './dom.js';
+import { qrHandoff } from './qrPanel.js';
 import { caps, describeEnvironment } from '../crypto/env.js';
 import { estimateStrength, generatePassphrase } from '../util/passphrase.js';
 import { formatBytes, formatDuration } from '../util/bytes.js';
@@ -112,12 +113,19 @@ export function progressReadout(bytes: number, total: number, rate: number, eta:
   );
 }
 
-/** The six-digit session code, sized to be readable across a room. */
-export function codeWell(code: string, caption: string): HTMLElement {
+/**
+ * The six-digit session code, sized to be readable across a room.
+ *
+ * With a passphrase to hand it also offers the QR handoff, which carries both
+ * halves at once. Without one - on the receiving side - there is nothing to
+ * hand over and the offer is left out entirely.
+ */
+export function codeWell(code: string, caption: string, passphrase?: string): HTMLElement {
   return el('div', { class: 'code-well' },
     el('p', { class: 'eyebrow', text: 'Code' }),
     el('div', { class: 'code-digits mono', text: code }),
     el('p', { class: 'hint', text: caption }),
+    passphrase ? qrHandoff(code, passphrase) : null,
   );
 }
 

@@ -18,6 +18,12 @@ export interface TransferScreenOptions {
   title: string;
   onCancel: () => void;
   onRestart: () => void;
+  /**
+   * The sender's passphrase, so the code panel can offer the QR handoff that
+   * carries the code and the passphrase together. Absent when receiving: the
+   * receiver has nothing to hand over.
+   */
+  passphrase?: string;
 }
 
 export class TransferScreen {
@@ -91,7 +97,11 @@ export class TransferScreen {
   handle(event: TransferEvent): void {
     switch (event.t) {
       case 'code':
-        mount(this.codeSlot, codeWell(event.code, 'Type this on the other device, then the passphrase.'));
+        mount(this.codeSlot, codeWell(
+          event.code,
+          'Type this on the other device, then the passphrase.',
+          this.options.passphrase,
+        ));
         this.setState('Waiting', 'working');
         announce(`Your code is ${event.code.split('').join(' ')}`);
         break;
@@ -349,7 +359,11 @@ export class TransferScreen {
       },
     });
 
-    mount(this.codeSlot, codeWell(code, 'The other device needs this code and the passphrase.'));
+    mount(this.codeSlot, codeWell(
+      code,
+      'The other device needs this code and the passphrase.',
+      this.options.passphrase,
+    ));
     mount(this.extraSlot,
       specList([
         ['Expires', expiry.toLocaleString(), ''],

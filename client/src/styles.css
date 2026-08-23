@@ -515,6 +515,34 @@ input.code-entry {
   padding: 0.6rem 0.5rem;
 }
 
+/* --- QR handoff ---------------------------------------------------------- */
+
+.qr-handoff {
+  margin-top: 0.9rem;
+}
+
+/*
+ * Fixed black on white in both themes. Everything else here inverts in dark
+ * mode; a QR code must not, because plenty of scanners will not read an
+ * inverted symbol. The border keeps the white plate from floating against a
+ * dark panel.
+ */
+.qr-code {
+  display: block;
+  width: 100%;
+  max-width: 15rem;
+  height: auto;
+  margin: 0.85rem auto 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.qr-warning {
+  max-width: 22rem;
+  margin: 0.5rem auto 0;
+}
+
 /* --- verification (short authentication string) -------------------------- */
 
 .verify {
